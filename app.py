@@ -462,9 +462,9 @@ def build_app():
                 stage_view = gr.Markdown(elem_id="main-panel")
 
                 with gr.Accordion("Presenter details: structured record / full output", open=False):
-                    detail_box = gr.Textbox(label="Structured stage detail", lines=18, show_copy_button=True)
+                    detail_box = gr.Textbox(label="Structured stage detail", lines=18)
                 with gr.Accordion("Optional audit: actual prompt used for this stage", open=False):
-                    prompt_box = gr.Textbox(label="Prompt text", lines=16, show_copy_button=True)
+                    prompt_box = gr.Textbox(label="Prompt text", lines=16)
 
         gr.Markdown(
             """
