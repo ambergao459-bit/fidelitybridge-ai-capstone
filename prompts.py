@@ -150,7 +150,7 @@ Generated output:
 {generated_output}
 """
 
-QA_FIX_PROMPT = """STAGE 7: QA CATCH + TARGETED FIX
+QA_FIX_PROMPT = """STAGE 6: REVIEW + QA CATCH + TARGETED FIX
 Find one real fidelity risk in the generated output and repair it. Prioritize causal overstatement, invented specificity, scope collapse, method flattening, or actionability drift.
 Return Markdown with these headings:
 1. QA Catch

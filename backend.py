@@ -1,8 +1,8 @@
 """Backend workflow for FidelityBridge AI.
 
-The backend is organized around the required demo stages:
-1 intake/parse -> 2 extract -> 3 classify/route -> 4 show prompt ->
-5 generate -> 6 score -> 7 QA catch/fix.
+The backend is organized around the required six-stage demo workflow:
+1 intake/parse -> 2 extract -> 3 classify/route -> 4 generate ->
+5 score -> 6 review/QA catch/fix.
 
 It uses OpenAI or any OpenAI-compatible API when OPENAI_API_KEY is set.
 If no API key is present, it falls back to a transparent rule-based demo mode so
@@ -382,10 +382,9 @@ def build_presenter_card(state: Dict[str, Any]) -> str:
 1. Intake: uploaded and parsed the paper.
 2. Extract: showed method, sample/context, findings, limits, and what the paper does not prove.
 3. Classify: routed it to **{tradition}** rules.
-4. Prompt: showed the actual output prompt before generation.
-5. Generate: produced only 1-2 outputs, not all 18.
-6. Score: scored D1-D7 and identified **{weakest}** as weakest.
-7. QA catch: connected the fix to a named failure mode.
+4. Generate: produced only 1-2 outputs, not all 18, using the visible output prompt and schema.
+5. Score: scored D1-D7 and identified **{weakest}** as weakest.
+6. Review: connected one QA catch and targeted fix to a named failure mode.
 
 ## QA Catch / Fix
 {qa}
@@ -582,19 +581,20 @@ def _find_sample(text: str) -> str:
 
 def _guess_design(text: str) -> str:
     lower = text.lower()
-    if "randomized" in lower or "randomised" in lower or "experiment" in lower:
-        return "Experimental design or intervention study"
+    # Prefer explicit design evidence over isolated words such as "experiment" in a city/program context.
     if "meta-analysis" in lower or "meta analysis" in lower:
         return "Meta-analysis"
     if "systematic review" in lower:
         return "Systematic review"
-    if "interview" in lower or "focus group" in lower or "ethnograph" in lower:
-        return "Qualitative design"
     if "mixed methods" in lower or "mixed-method" in lower:
         return "Mixed-methods design"
-    if "survey" in lower or "sem" in lower or "regression" in lower or "path analysis" in lower:
+    if "survey" in lower or "questionnaire" in lower or "sem" in lower or "structural equation" in lower or "regression" in lower or "path analysis" in lower:
         return "Quantitative survey/statistical analysis"
-    if "theoretical" in lower or "framework" in lower or "conceptual" in lower:
+    if "randomized" in lower or "randomised" in lower or "field experiment" in lower or "lab experiment" in lower or "control group" in lower or "treatment group" in lower:
+        return "Experimental design or intervention study"
+    if "interview" in lower or "focus group" in lower or "ethnograph" in lower:
+        return "Qualitative design"
+    if "theoretical" in lower or "conceptual framework" in lower:
         return "Theoretical/conceptual paper"
     return "Design should be verified from methods section."
 
@@ -605,10 +605,12 @@ def _guess_tradition(text: str) -> str:
         return "Systematic Review"
     if "meta-analysis" in lower or "meta analysis" in lower:
         return "Meta-analysis"
-    if "randomized" in lower or "randomised" in lower or "experiment" in lower:
-        return "Experimental"
     if "mixed methods" in lower or "mixed-method" in lower:
         return "Mixed Methods"
+    if "survey" in lower or "questionnaire" in lower or "sem" in lower or "structural equation" in lower or "regression" in lower or "path analysis" in lower:
+        return "Quantitative"
+    if "randomized" in lower or "randomised" in lower or "field experiment" in lower or "lab experiment" in lower or "control group" in lower or "treatment group" in lower:
+        return "Experimental"
     if "interview" in lower or "focus group" in lower or "thematic analysis" in lower:
         return "Qualitative"
     if "theoretical" in lower or "conceptual framework" in lower:
