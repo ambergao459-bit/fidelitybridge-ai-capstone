@@ -2,7 +2,7 @@
 No paid API is used. The app uses deterministic extraction, routing, templates, and QA checks.
 """
 
-APP_TITLE = "FidelityBridge AI — Free Workflow Demo"
+APP_TITLE = "FidelityBridge AI"
 
 STAGES = [
     ("intake", "1 Intake"),

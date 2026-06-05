@@ -233,7 +233,7 @@ def detect_publication_venue(text: str) -> str:
         if any(token in low for token in ["journal", "review", "administration", "policy", "sage open", "public management"]):
             if 3 <= len(line) <= 90:
                 venue_candidates.append(line)
-    # Special common case for the demo paper.
+    # Special common case for the prepared-trace paper.
     for line in lines[:20]:
         if line.lower().strip() == "sage open":
             return "SAGE Open"
@@ -345,7 +345,7 @@ def detect_sample(text: str) -> str:
     nums = re.findall(r"\b\d{2,5}\b\s+(?:urban|rural|total|valid|returned|surveys|questionnaires|respondents|residents)", text, flags=re.IGNORECASE)
     if nums:
         return "; ".join(nums[:4])
-    return "Sample/context not automatically detected; presenter should verify this field against the paper."
+    return "Sample/context not automatically detected; user should verify this field against the paper."
 
 
 def detect_variables(text: str, abstract: str) -> List[str]:
@@ -535,7 +535,7 @@ def classify_record(text: str, record: ExtractionRecord) -> ClassificationRecord
         guardrails = ["Mention search/inclusion scope", "Do not claim direct implementation proof"]
     else:
         route = "Route to conservative default; require human method check before public use."
-        boundary = "Use cautious language until a presenter verifies the design."
+        boundary = "Use cautious language until the design is verified."
         guardrails = ["Human method check", "No causal claims", "Name uncertainty"]
 
     return ClassificationRecord(tradition, confidence, route, boundary, guardrails)

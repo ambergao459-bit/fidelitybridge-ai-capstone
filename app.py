@@ -1,5 +1,5 @@
 import json
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import gradio as gr
 
@@ -7,101 +7,208 @@ from backend import run_workflow, save_trace
 from prompts import APP_TITLE, OUTPUT_TYPES, STAGE_PROMPTS, STAGES
 
 CSS = """
-:root { --brand:#ff6b1a; --ink:#172033; --soft:#fff4e8; --line:#e8ecf3; --green:#12a150; }
-.gradio-container { max-width: 1320px !important; margin: auto !important; font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif !important; background:#f7f9fc !important; }
-.hero { padding: 26px 30px; border:1px solid #dbece3; border-radius:24px; background:linear-gradient(135deg,#f7fffb,#eef7ff); box-shadow:0 8px 30px rgba(15,23,42,.06); }
-.hero h1 { margin:0; font-size:34px; color:var(--ink); }
-.hero p { margin:10px 0 0; line-height:1.65; color:#344054; }
-.panel { border:1px solid var(--line); border-radius:22px; background:#fff; box-shadow:0 8px 22px rgba(15,23,42,.06); padding:18px; }
-.stage-title { font-size:30px; font-weight:850; color:var(--ink); margin:8px 0 12px; }
-.mode-ok { display:inline-block; padding:8px 12px; border-radius:999px; background:#e9fff2; color:#07783d; font-weight:750; border:1px solid #b9efcf; }
-.workflow-note { color:#526071; font-size:15px; margin-bottom:16px; }
-.stage-card { border-left:8px solid var(--brand); background:#fff; border-radius:20px; padding:24px 28px; box-shadow:0 8px 28px rgba(15,23,42,.08); font-size:17px; line-height:1.72; color:#172033; }
-.stage-card h3 { margin-top:0; font-size:24px; }
-.stage-card strong { color:#121a2b; }
-.stage-card table { width:100%; border-collapse:collapse; margin-top:8px; }
-.stage-card td, .stage-card th { border-bottom:1px solid #edf1f7; padding:10px 8px; vertical-align:top; }
-.stage-card th { text-align:left; background:#f8fafc; }
-button.stage-btn { border-radius:22px !important; min-height:72px !important; font-size:20px !important; font-weight:850 !important; border:1px solid #e3e8ef !important; background:white !important; box-shadow:0 8px 20px rgba(15,23,42,.08) !important; color:#172033 !important; }
-button.stage-btn:hover { border-color:#ffad7c !important; box-shadow:0 10px 26px rgba(255,107,26,.18) !important; transform:translateY(-1px); }
-button.primary-run { border-radius:16px !important; min-height:58px !important; font-size:20px !important; font-weight:850 !important; background:var(--brand) !important; color:white !important; border:0 !important; }
-.label-pill { display:inline-block; margin:4px 6px 4px 0; padding:8px 12px; border-radius:999px; background:#f2f5f9; border:1px solid #e1e7ef; font-weight:700; color:#4b5565; }
-.label-done { background:#eafff3; border-color:#b8edcf; color:#087a3d; }
-.label-active { background:#fff2e8; border-color:#ffc69e; color:#b54600; }
-textarea, input { border-radius:14px !important; }
+:root {
+  --brand: #f97316;
+  --ink: #111827;
+  --muted: #4b5563;
+  --line: #e5e7eb;
+  --panel: #ffffff;
+  --bg: #f8fafc;
+}
+* { box-sizing: border-box; }
+.gradio-container {
+  max-width: 1280px !important;
+  margin: 0 auto !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, "PingFang SC", "Microsoft YaHei", sans-serif !important;
+  background: var(--bg) !important;
+  color: var(--ink) !important;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+.hero {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 22px 26px;
+  margin-bottom: 12px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+}
+.hero h1 { margin: 0 0 8px 0; font-size: 30px; line-height: 1.25; font-weight: 800; }
+.hero p { margin: 0; color: var(--muted); font-size: 16px; line-height: 1.55; }
+.left-panel, .stage-output {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 16px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.05);
+}
+.section-label { font-weight: 750; margin: 6px 0 8px; color: var(--ink); }
+button.stage-btn {
+  border-radius: 16px !important;
+  min-height: 64px !important;
+  font-size: 18px !important;
+  font-weight: 750 !important;
+  border: 1px solid var(--line) !important;
+  background: #fff !important;
+  color: var(--ink) !important;
+  box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06) !important;
+}
+button.stage-btn:hover {
+  border-color: #fdba74 !important;
+  box-shadow: 0 6px 16px rgba(249, 115, 22, 0.16) !important;
+}
+button.primary-run {
+  border-radius: 14px !important;
+  min-height: 56px !important;
+  font-size: 18px !important;
+  font-weight: 800 !important;
+  background: var(--brand) !important;
+  color: white !important;
+  border: none !important;
+}
+.stage-title { margin: 0 0 14px; font-size: 28px; line-height: 1.25; font-weight: 800; color: var(--ink); }
+.stage-card {
+  border-left: 6px solid var(--brand);
+  background: #fff;
+  border-radius: 18px;
+  padding: 22px 24px;
+  box-shadow: 0 6px 18px rgba(15, 23, 42, 0.06);
+  font-size: 16px;
+  line-height: 1.68;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+.stage-card h3 { margin: 0 0 12px; font-size: 22px; line-height: 1.3; font-weight: 800; }
+.stage-card p { margin: 10px 0; }
+.stage-card strong { font-weight: 800; color: var(--ink); }
+.stage-card table { width: 100%; border-collapse: collapse; margin: 8px 0 14px; table-layout: fixed; }
+.stage-card th, .stage-card td { border-bottom: 1px solid #edf1f7; padding: 10px 8px; vertical-align: top; overflow-wrap: break-word; }
+.stage-card th { width: 190px; text-align: left; background: #f9fafb; font-weight: 800; }
+.stage-card ul { margin: 8px 0 0 22px; padding: 0; }
+.stage-card li { margin: 4px 0; }
+.status-row { margin: 8px 0 16px; display: flex; flex-wrap: wrap; gap: 8px; }
+.status-pill { display: inline-block; padding: 7px 10px; border-radius: 999px; border: 1px solid #d1d5db; background: #fff; color: #374151; font-size: 14px; font-weight: 700; }
+.status-pill.done { background: #ecfdf5; border-color: #a7f3d0; color: #047857; }
+.status-pill.active { background: #fff7ed; border-color: #fdba74; color: #c2410c; }
+.audit-box { margin-top: 16px; color: #4b5563; }
+.audit-box summary { cursor: pointer; font-weight: 700; }
+.audit-pre {
+  white-space: pre-wrap;
+  background: #f9fafb;
+  border: 1px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px;
+  color: #374151;
+  font-size: 14px;
+  line-height: 1.55;
+}
+pre.json-block {
+  white-space: pre-wrap;
+  background: #111827;
+  color: #f9fafb;
+  border-radius: 12px;
+  padding: 14px;
+  overflow: auto;
+  font-size: 14px;
+  line-height: 1.5;
+}
+textarea, input { border-radius: 12px !important; }
+@media (max-width: 900px) {
+  .stage-title { font-size: 24px; }
+  .stage-card { font-size: 15px; padding: 18px; }
+  .stage-card th { width: 135px; }
+  button.stage-btn { font-size: 16px !important; min-height: 56px !important; }
+}
 """
 
 
 def esc(text: Any) -> str:
     if text is None:
         return ""
-    return str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+    return (
+        str(text)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
 
 
-def bullet(items: List[str]) -> str:
+def bullet(items: Optional[List[str]]) -> str:
     if not items:
-        return "<em>None detected.</em>"
-    return "<ul>" + "".join(f"<li>{esc(x)}</li>" for x in items) + "</ul>"
+        return "<p>None detected.</p>"
+    return "<ul>" + "".join(f"<li>{esc(item)}</li>" for item in items) + "</ul>"
 
 
 def json_pretty(obj: Any) -> str:
-    return "<pre style='white-space:pre-wrap;background:#0b1020;color:#eaf2ff;border-radius:14px;padding:16px;overflow:auto;'>" + esc(json.dumps(obj, ensure_ascii=False, indent=2)) + "</pre>"
+    return "<pre class='json-block'>" + esc(json.dumps(obj, ensure_ascii=False, indent=2)) + "</pre>"
+
+
+def audit(stage: str) -> str:
+    rule = STAGE_PROMPTS.get(stage, "")
+    if not rule:
+        return ""
+    return f"""
+    <details class='audit-box'>
+      <summary>System rule used for this stage</summary>
+      <div class='audit-pre'>{esc(rule)}</div>
+    </details>
+    """
+
+
+def status_html(active: str, has_trace: bool) -> str:
+    pills = []
+    for key, label in STAGES:
+        cls = "active" if key == active else ("done" if has_trace else "")
+        pills.append(f"<span class='status-pill {cls}'>{esc(label)}</span>")
+    return "<div class='status-row'>" + "".join(pills) + "</div>"
 
 
 def render_empty() -> str:
     return """
-    <div class='stage-title'>Ready for live demo</div>
-    <div class='workflow-note'>Upload a paper or paste text, choose 1-2 output types, then click <strong>Run Full Workflow</strong>. After it runs, click the six stage cards above to present each part.</div>
-    <div class='stage-card'>
-      <h3>What this free version does</h3>
-      <p><strong>No paid API is required.</strong> This version uses deterministic parsing, method detection, output templates, fidelity scoring rules, and QA checks. It is fully interactive and safe for a classroom demo when API credits are unavailable.</p>
-      <p>It still follows the required staged workflow: <strong>Intake → Extract → Classify → Generate → Score → Review</strong>.</p>
+    <div class='stage-output'>
+      <div class='stage-title'>Ready</div>
+      <div class='stage-card'>
+        <h3>Upload a paper and run the workflow</h3>
+        <p>The system will process the paper through six visible stages: Intake, Extract, Classify, Generate, Score, and Review.</p>
+        <p>No API key or paid model is required.</p>
+      </div>
     </div>
     """
 
 
-def progress_html(active: str, has_trace: bool) -> str:
-    pills = []
-    for idx, (key, label) in enumerate(STAGES, start=1):
-        cls = "label-active" if key == active else ("label-done" if has_trace else "")
-        check = "✓ " if has_trace else ""
-        pills.append(f"<span class='label-pill {cls}'>{check}{esc(label)}</span>")
-    return "".join(pills)
-
-
-def render_stage(trace: Dict[str, Any] | None, stage: str) -> str:
+def render_stage(trace: Optional[Dict[str, Any]], stage: str) -> str:
     if not trace:
         return render_empty()
-    mode = trace.get("mode", "Free workflow")
-    header = f"<span class='mode-ok'>Mode: {esc(mode)}</span>"
-    progress = progress_html(stage, True)
+
+    progress = status_html(stage, True)
 
     if stage == "intake":
         meta = trace.get("intake", {})
         preview = trace.get("raw_text_preview", "")
-        body = f"""
+        content = f"""
         <div class='stage-title'>Stage 1 — Intake / Parse</div>
-        {header}<div style='height:12px'></div>{progress}
+        {progress}
         <div class='stage-card'>
-          <h3>What the system ingested</h3>
+          <h3>Input record</h3>
           <table>
             <tr><th>Source type</th><td>{esc(meta.get('source_type'))}</td></tr>
             <tr><th>File name</th><td>{esc(meta.get('file_name'))}</td></tr>
             <tr><th>File size</th><td>{esc(meta.get('file_size_kb', 'N/A'))} KB</td></tr>
             <tr><th>Text characters used</th><td>{esc(meta.get('text_characters_used'))}</td></tr>
           </table>
-          <h3>Parsed paper preview</h3>
-          <p>{esc(preview[:1400])}</p>
-          <p><strong>Presenter line:</strong> “This first step proves we are feeding the paper into a staged workflow, not hiding the process inside one mega-prompt.”</p>
+          <h3>Parsed preview</h3>
+          <p>{esc(preview[:1500])}</p>
         </div>
+        {audit(stage)}
         """
     elif stage == "extract":
         ex = trace.get("extraction", {})
-        body = f"""
+        content = f"""
         <div class='stage-title'>Stage 2 — Extract Evidence</div>
-        {header}<div style='height:12px'></div>{progress}
+        {progress}
         <div class='stage-card'>
-          <h3>Structured extraction record</h3>
+          <h3>Article metadata</h3>
           <table>
             <tr><th>Title</th><td>{esc(ex.get('paper_title'))}</td></tr>
             <tr><th>Author(s)</th><td>{esc(ex.get('authors'))}</td></tr>
@@ -109,8 +216,9 @@ def render_stage(trace: Dict[str, Any] | None, stage: str) -> str:
             <tr><th>Publication venue</th><td>{esc(ex.get('publication_venue'))}</td></tr>
             <tr><th>Publication period</th><td>{esc(ex.get('publication_period'))}</td></tr>
             <tr><th>DOI</th><td>{esc(ex.get('doi'))}</td></tr>
+            <tr><th>Citation draft</th><td>{esc(ex.get('citation_apa'))}</td></tr>
           </table>
-          <p><strong>APA-style citation draft:</strong> {esc(ex.get('citation_apa'))}</p>
+          <h3>Evidence record</h3>
           <p><strong>Research objective:</strong> {esc(ex.get('research_objective'))}</p>
           <p><strong>Method / design:</strong> {esc(ex.get('method_design'))}</p>
           <p><strong>Sample / context:</strong> {esc(ex.get('sample_context'))}</p>
@@ -118,116 +226,135 @@ def render_stage(trace: Dict[str, Any] | None, stage: str) -> str:
           <p><strong>Key finding:</strong> {esc(ex.get('key_findings'))}</p>
           <p><strong>Limits / boundaries:</strong> {esc(ex.get('limitations_or_boundaries'))}</p>
           <p><strong>What the paper does not prove:</strong> {esc(ex.get('what_the_paper_does_not_prove'))}</p>
-          <p><strong>Presenter line:</strong> “This extraction sheet captures citation metadata first, then method, sample, findings, and evidence limits.”</p>
         </div>
+        {audit(stage)}
         """
     elif stage == "classify":
         cl = trace.get("classification", {})
-        body = f"""
+        content = f"""
         <div class='stage-title'>Stage 3 — Classify + Route</div>
-        {header}<div style='height:12px'></div>{progress}
+        {progress}
         <div class='stage-card'>
-          <h3>Methodological classification</h3>
+          <h3>Method classification</h3>
           <table>
-            <tr><th>Tradition</th><td><strong>{esc(cl.get('methodological_tradition'))}</strong></td></tr>
+            <tr><th>Tradition</th><td>{esc(cl.get('methodological_tradition'))}</td></tr>
             <tr><th>Confidence</th><td>{esc(cl.get('confidence'))}</td></tr>
             <tr><th>Route</th><td>{esc(cl.get('route'))}</td></tr>
             <tr><th>Evidence boundary</th><td>{esc(cl.get('evidence_boundary'))}</td></tr>
           </table>
           <h3>Guardrails loaded</h3>
           {bullet(cl.get('recommended_guardrails', []))}
-          <p><strong>Presenter line:</strong> “The classifier decides which evidence rules load before generation.”</p>
         </div>
+        {audit(stage)}
         """
     elif stage == "generate":
         outputs = trace.get("outputs", {})
         cards = ""
         for name, text in outputs.items():
-            cards += f"<h3>{esc(name)}</h3><div style='border:1px solid #edf1f7;border-radius:16px;padding:16px;margin-bottom:18px;background:#fbfcff'>{text}</div>"
-        body = f"""
-        <div class='stage-title'>Stage 4 — Generate 1-2 Outputs</div>
-        {header}<div style='height:12px'></div>{progress}
+            cards += f"<h3>{esc(name)}</h3><div style='border:1px solid #edf1f7;border-radius:14px;padding:16px;margin:0 0 18px;background:#fbfcff'>{text}</div>"
+        content = f"""
+        <div class='stage-title'>Stage 4 — Generate Outputs</div>
+        {progress}
         <div class='stage-card'>
-          <p><strong>Live-demo rule:</strong> only generate 1-2 representative outputs, not all 18.</p>
+          <p><strong>Output count:</strong> {len(outputs)} selected output type(s)</p>
           {cards}
-          <p><strong>Presenter line:</strong> “The output is generated from the extraction record, not from a hidden all-in-one prompt.”</p>
         </div>
+        {audit(stage)}
         """
     elif stage == "score":
         scores = trace.get("scores", {})
         means = scores.get("dimension_means", {})
-        by_output = scores.get("by_output", {})
-        rows = "".join(f"<tr><td>{esc(k)}</td><td><strong>{esc(v)}</strong></td></tr>" for k, v in means.items())
-        details = json_pretty(by_output)
-        body = f"""
+        rows = "".join(f"<tr><td>{esc(k)}</td><td>{esc(v)}</td></tr>" for k, v in means.items())
+        details = json_pretty(scores.get("by_output", {}))
+        content = f"""
         <div class='stage-title'>Stage 5 — Score D1-D7</div>
-        {header}<div style='height:12px'></div>{progress}
+        {progress}
         <div class='stage-card'>
           <h3>Dimension means</h3>
           <table><tr><th>Dimension</th><th>Mean score</th></tr>{rows}</table>
           <p><strong>Weakest dimension:</strong> {esc(scores.get('weakest_dimension'))}</p>
-          <details><summary><strong>Open detailed scores by output</strong></summary>{details}</details>
-          <p><strong>Presenter line:</strong> “We are not just saying the output looks good; we score it dimension by dimension.”</p>
+          <details><summary><strong>Detailed scores by output</strong></summary>{details}</details>
         </div>
+        {audit(stage)}
+        """
+    elif stage == "review":
+        review = trace.get("review", {})
+        content = f"""
+        <div class='stage-title'>Stage 6 — Review / QA Fix</div>
+        {progress}
+        <div class='stage-card'>
+          <h3>QA check</h3>
+          <p>{esc(review.get('qa_catch'))}</p>
+          <h3>Issues detected</h3>
+          {bullet(review.get('issues_detected', []))}
+          <h3>Targeted fixes</h3>
+          {bullet(review.get('targeted_fixes', []))}
+        </div>
+        {audit(stage)}
         """
     else:
-        rev = trace.get("review", {})
-        body = f"""
-        <div class='stage-title'>Stage 6 — Review / QA Fix</div>
-        {header}<div style='height:12px'></div>{progress}
-        <div class='stage-card'>
-          <h3>QA catch</h3>
-          <p>{esc(rev.get('qa_catch'))}</p>
-          <h3>Issues detected</h3>
-          {bullet(rev.get('issues_detected', []))}
-          <h3>Targeted fixes</h3>
-          {bullet(rev.get('targeted_fixes', []))}
-          <p><strong>Presenter line:</strong> “This is the review step that prevents causal creep, scope collapse, and invented specificity before the output is used.”</p>
+        content = render_empty()
+
+    return f"<div class='stage-output'>{content}</div>"
+
+
+def run_and_render(file_obj: Any, pasted_text: str, selected_outputs: List[str], audience: str):
+    try:
+        selected = selected_outputs or ["Technical Note", "Media Release"]
+        trace = run_workflow(file_obj, pasted_text, selected[:2], audience or "public administration practitioners")
+        export_path = save_trace(trace)
+        return trace, render_stage(trace, "intake"), export_path
+    except Exception as exc:
+        error_html = f"""
+        <div class='stage-output'>
+          <div class='stage-title'>Error</div>
+          <div class='stage-card'><p>{esc(str(exc))}</p></div>
         </div>
         """
-
-    prompt = STAGE_PROMPTS.get(stage, "")
-    return body + f"<details style='margin-top:16px'><summary><strong>Optional audit: rule/prompt used for this stage</strong></summary>{json_pretty(prompt)}</details>"
+        return None, error_html, None
 
 
-def run_and_render(file_obj, pasted_text, output_types, audience):
-    try:
-        trace = run_workflow(file_obj, pasted_text or "", output_types or ["Technical Note"], audience or "public administration practitioners")
-        return trace, render_stage(trace, "intake"), save_trace(trace)
-    except Exception as exc:
-        err = {"error": str(exc)}
-        html = f"<div class='stage-card'><h3>Could not run workflow</h3><p>{esc(exc)}</p></div>"
-        return err, html, None
-
-
-def show_stage(trace, stage):
+def show_stage(trace: Optional[Dict[str, Any]], stage: str):
     return render_stage(trace, stage)
 
 
 with gr.Blocks(title=APP_TITLE, css=CSS) as demo:
-    gr.HTML(f"""
-    <div class='hero'>
-      <h1>FidelityBridge AI</h1>
-      <p><strong>A free, staged AI Playbook workflow for Capstone live demonstration.</strong></p>
-      <p>This version requires <strong>no OpenAI API key, no paid model, and no platform credit</strong>. It runs a deterministic research-translation workflow: <strong>Intake → Extract → Classify → Generate → Score → Review</strong>. Every intermediate result stays visible for the audience.</p>
-    </div>
-    """)
-
+    gr.HTML(
+        """
+        <div class='hero'>
+          <h1>FidelityBridge AI</h1>
+          <p>Upload a paper, choose 1-2 output types, and run the six-stage workflow.</p>
+        </div>
+        """
+    )
     state = gr.State(value=None)
 
     with gr.Row():
-        with gr.Column(scale=4, elem_classes=["panel"]):
-            gr.Markdown("## Paper input")
-            file_in = gr.File(label="Upload paper PDF / DOCX / TXT", file_types=[".pdf", ".docx", ".txt"])
-            pasted = gr.Textbox(label="Or paste paper text", placeholder="Paste abstract, methods, or full paper text here if needed...", lines=9)
-            outputs = gr.CheckboxGroup(choices=OUTPUT_TYPES, value=["Technical Note", "Media Release"], label="Output types for live demo", info="Choose 1-2. The app uses only the first two selected outputs.")
-            audience = gr.Textbox(value="public administration practitioners and agency managers", label="Target audience")
-            run_btn = gr.Button("Run Full Workflow", elem_classes=["primary-run"])
-            reset_btn = gr.Button("Reset")
-            export_file = gr.File(label="Download JSON trace", interactive=False)
+        with gr.Column(scale=4):
+            with gr.Group(elem_classes=["left-panel"]):
+                gr.Markdown("### Paper input")
+                file_in = gr.File(label="Upload paper PDF / DOCX / TXT", file_types=[".pdf", ".docx", ".txt"])
+                pasted = gr.Textbox(
+                    label="Or paste paper text",
+                    lines=8,
+                    placeholder="Paste abstract, methods, or full paper text here if needed...",
+                )
+                outputs = gr.CheckboxGroup(
+                    choices=OUTPUT_TYPES,
+                    value=["Technical Note", "Media Release"],
+                    label="Output types for live run",
+                    info="Choose 1-2. The system uses only the first two selected outputs.",
+                )
+                audience = gr.Textbox(
+                    label="Target audience",
+                    value="public administration practitioners and agency managers",
+                )
+                run_btn = gr.Button("Run Full Workflow", elem_classes=["primary-run"])
+                reset_btn = gr.Button("Reset")
+                export_file = gr.File(label="Download JSON trace", interactive=False)
 
         with gr.Column(scale=8):
-            gr.Markdown("## Six visible workflow stages")
+            gr.Markdown("### Six workflow stages")
             with gr.Row():
                 b1 = gr.Button("1 Intake", elem_classes=["stage-btn"])
                 b2 = gr.Button("2 Extract", elem_classes=["stage-btn"])
