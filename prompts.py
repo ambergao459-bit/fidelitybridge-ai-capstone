@@ -128,7 +128,7 @@ Return Markdown with clear headings for each output.
 SCORING_PROMPT = """STAGE 6: SCORE ON 7 FIDELITY DIMENSIONS
 Score the generated output against the extraction sheet and classification route.
 Return valid JSON only, with:
-- scores: object with D1_Claim_Accuracy, D2_Causal_Precision, D3_Scope_Fidelity, D4_Method_Transparency, D5_Nuance_Preservation, D6_Audience_Calibration, D7_Actionability. Each dimension must include {score, reason}.
+- scores: object with D1_Claim_Accuracy, D2_Causal_Precision, D3_Scope_Fidelity, D4_Method_Transparency, D5_Nuance_Preservation, D6_Audience_Calibration, D7_Actionability. Each dimension must include two fields named score and reason.
 - weakest_dimension
 - strongest_dimension
 - likely_failure_modes
