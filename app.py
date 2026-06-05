@@ -173,7 +173,7 @@ def json_pretty(obj: Any) -> str:
 
 def render_before_after(items: Optional[List[Dict[str, Any]]]) -> str:
     if not items:
-        return "<p>No automatic rewrite was required.</p>"
+        return "<p>No review rewrite item was generated.</p>"
     rows = []
     for item in items:
         rows.append(
@@ -203,7 +203,7 @@ STAGE_FUNCTIONS = {
     "classify": ["classify_record"],
     "generate": ["bounded_finding", "generate_output", "generate_outputs"],
     "score": ["score_one_output", "score_outputs"],
-    "review": ["review_outputs"],
+    "review": ["_plain_output_sentences", "_rewrite_sentence_for_review", "_select_review_sentence", "review_outputs"],
 }
 
 
