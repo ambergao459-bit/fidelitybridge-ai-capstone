@@ -1,8 +1,10 @@
+import inspect
 import json
 from typing import Any, Dict, List, Optional
 
 import gradio as gr
 
+import backend as backend_mod
 from backend import run_workflow, save_trace
 from prompts import APP_TITLE, OUTPUT_TYPES, STAGE_PROMPTS, STAGES
 
@@ -102,6 +104,31 @@ button.primary-run {
   font-size: 14px;
   line-height: 1.55;
 }
+.code-section {
+  margin-top: 20px;
+  border-top: 1px solid #e5e7eb;
+  padding-top: 16px;
+}
+.code-title {
+  font-size: 18px;
+  font-weight: 800;
+  margin: 0 0 10px;
+  color: #111827;
+}
+.code-pre {
+  white-space: pre-wrap;
+  background: #0f172a;
+  color: #e5e7eb;
+  border: 1px solid #1f2937;
+  border-radius: 14px;
+  padding: 16px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 13px;
+  line-height: 1.55;
+  max-height: 420px;
+  overflow: auto;
+}
+.compare-table th { width: 160px !important; }
 pre.json-block {
   white-space: pre-wrap;
   background: #111827;
@@ -144,15 +171,60 @@ def json_pretty(obj: Any) -> str:
     return "<pre class='json-block'>" + esc(json.dumps(obj, ensure_ascii=False, indent=2)) + "</pre>"
 
 
-def audit(stage: str) -> str:
-    rule = STAGE_PROMPTS.get(stage, "")
-    if not rule:
+def render_before_after(items: Optional[List[Dict[str, Any]]]) -> str:
+    if not items:
+        return "<p>No automatic rewrite was required.</p>"
+    rows = []
+    for item in items:
+        rows.append(
+            "<tr><th>Location</th><td>" + esc(item.get("location")) + "</td></tr>"
+            "<tr><th>Before</th><td>" + esc(item.get("before")) + "</td></tr>"
+            "<tr><th>After</th><td>" + esc(item.get("after")) + "</td></tr>"
+            "<tr><th>Reason</th><td>" + esc(item.get("reason")) + "</td></tr>"
+        )
+    return "<table class='compare-table'>" + "".join(rows) + "</table>"
+
+
+STAGE_FUNCTIONS = {
+    "intake": ["read_uploaded_file", "read_pdf", "read_docx", "normalize_text", "clean_pdf_artifacts"],
+    "extract": [
+        "make_extraction_record",
+        "detect_title",
+        "detect_authors",
+        "detect_publication_year",
+        "detect_publication_venue",
+        "detect_doi",
+        "detect_research_objective",
+        "detect_method",
+        "detect_sample",
+        "detect_key_findings",
+        "detect_limitations",
+    ],
+    "classify": ["classify_record"],
+    "generate": ["bounded_finding", "generate_output", "generate_outputs"],
+    "score": ["score_one_output", "score_outputs"],
+    "review": ["review_outputs"],
+}
+
+
+def code_block(stage: str) -> str:
+    names = STAGE_FUNCTIONS.get(stage, [])
+    blocks = []
+    for name in names:
+        obj = getattr(backend_mod, name, None)
+        if obj is None:
+            continue
+        try:
+            blocks.append(inspect.getsource(obj).strip())
+        except Exception:
+            continue
+    if not blocks:
         return ""
     return f"""
-    <details class='audit-box'>
-      <summary>System rule used for this stage</summary>
-      <div class='audit-pre'>{esc(rule)}</div>
-    </details>
+    <div class='code-section'>
+      <div class='code-title'>Code used for this stage</div>
+      <pre class='code-pre'>{esc(chr(10) + chr(10).join(blocks))}</pre>
+    </div>
     """
 
 
@@ -171,7 +243,7 @@ def render_empty() -> str:
       <div class='stage-card'>
         <h3>Upload a paper and run the workflow</h3>
         <p>The system will process the paper through six visible stages: Intake, Extract, Classify, Generate, Score, and Review.</p>
-        <p>No API key or paid model is required.</p>
+        
       </div>
     </div>
     """
@@ -200,7 +272,7 @@ def render_stage(trace: Optional[Dict[str, Any]], stage: str) -> str:
           <h3>Parsed preview</h3>
           <p>{esc(preview[:1500])}</p>
         </div>
-        {audit(stage)}
+        {code_block(stage)}
         """
     elif stage == "extract":
         ex = trace.get("extraction", {})
@@ -227,7 +299,7 @@ def render_stage(trace: Optional[Dict[str, Any]], stage: str) -> str:
           <p><strong>Limits / boundaries:</strong> {esc(ex.get('limitations_or_boundaries'))}</p>
           <p><strong>What the paper does not prove:</strong> {esc(ex.get('what_the_paper_does_not_prove'))}</p>
         </div>
-        {audit(stage)}
+        {code_block(stage)}
         """
     elif stage == "classify":
         cl = trace.get("classification", {})
@@ -245,7 +317,7 @@ def render_stage(trace: Optional[Dict[str, Any]], stage: str) -> str:
           <h3>Guardrails loaded</h3>
           {bullet(cl.get('recommended_guardrails', []))}
         </div>
-        {audit(stage)}
+        {code_block(stage)}
         """
     elif stage == "generate":
         outputs = trace.get("outputs", {})
@@ -259,7 +331,7 @@ def render_stage(trace: Optional[Dict[str, Any]], stage: str) -> str:
           <p><strong>Output count:</strong> {len(outputs)} selected output type(s)</p>
           {cards}
         </div>
-        {audit(stage)}
+        {code_block(stage)}
         """
     elif stage == "score":
         scores = trace.get("scores", {})
@@ -272,10 +344,13 @@ def render_stage(trace: Optional[Dict[str, Any]], stage: str) -> str:
         <div class='stage-card'>
           <h3>Dimension means</h3>
           <table><tr><th>Dimension</th><th>Mean score</th></tr>{rows}</table>
-          <p><strong>Weakest dimension:</strong> {esc(scores.get('weakest_dimension'))}</p>
+          <table>
+            <tr><th>Strongest dimension</th><td>{esc(scores.get('strongest_dimension_label'))} ({esc(scores.get('strongest_dimension'))}) — {esc(scores.get('strongest_score'))}/5</td></tr>
+            <tr><th>Weakest dimension</th><td>{esc(scores.get('weakest_dimension_label'))} ({esc(scores.get('weakest_dimension'))}) — {esc(scores.get('weakest_score'))}/5</td></tr>
+          </table>
           <details><summary><strong>Detailed scores by output</strong></summary>{details}</details>
         </div>
-        {audit(stage)}
+        {code_block(stage)}
         """
     elif stage == "review":
         review = trace.get("review", {})
@@ -285,12 +360,14 @@ def render_stage(trace: Optional[Dict[str, Any]], stage: str) -> str:
         <div class='stage-card'>
           <h3>QA check</h3>
           <p>{esc(review.get('qa_catch'))}</p>
+          <h3>Before / after comparison</h3>
+          {render_before_after(review.get('before_after_comparison', []))}
           <h3>Issues detected</h3>
           {bullet(review.get('issues_detected', []))}
           <h3>Targeted fixes</h3>
           {bullet(review.get('targeted_fixes', []))}
         </div>
-        {audit(stage)}
+        {code_block(stage)}
         """
     else:
         content = render_empty()

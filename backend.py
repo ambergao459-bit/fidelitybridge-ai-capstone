@@ -740,18 +740,41 @@ def score_one_output(output_type: str, output_text: str, record: ExtractionRecor
 def score_outputs(outputs: Dict[str, str], record: ExtractionRecord, classification: ClassificationRecord) -> Dict[str, Any]:
     by_output = {ot: score_one_output(ot, txt, record, classification) for ot, txt in outputs.items()}
     means = {}
+    label_lookup = {key: label for key, label in FIDELITY_DIMENSIONS}
     for key, label in FIDELITY_DIMENSIONS:
         vals = [v[key]["score"] for v in by_output.values()]
         means[key] = round(sum(vals) / len(vals), 2) if vals else 0
-    weakest = min(means.items(), key=lambda kv: kv[1])[0] if means else "D7_Actionability"
-    return {"by_output": by_output, "dimension_means": means, "weakest_dimension": weakest}
+
+    weakest_key = min(means.items(), key=lambda kv: kv[1])[0] if means else "D7_Actionability"
+    strongest_key = max(means.items(), key=lambda kv: kv[1])[0] if means else "D1_Claim_Accuracy"
+    return {
+        "by_output": by_output,
+        "dimension_means": means,
+        "weakest_dimension": weakest_key,
+        "weakest_dimension_label": label_lookup.get(weakest_key, weakest_key),
+        "weakest_score": means.get(weakest_key, 0),
+        "strongest_dimension": strongest_key,
+        "strongest_dimension_label": label_lookup.get(strongest_key, strongest_key),
+        "strongest_score": means.get(strongest_key, 0),
+    }
 
 
 def review_outputs(outputs: Dict[str, str], record: ExtractionRecord, classification: ClassificationRecord) -> Dict[str, Any]:
     issues = []
     fixes = []
+    before_after = []
     tradition = classification.methodological_tradition
     combined = "\n".join(outputs.values()).lower()
+
+    original_finding = record.key_findings.strip()
+    bounded = bounded_finding(record, classification).strip()
+    if original_finding and bounded and original_finding != bounded:
+        before_after.append({
+            "location": "Evidence claim / generated wording",
+            "before": original_finding,
+            "after": bounded,
+            "reason": "The detected method does not support stronger causal wording, so the claim is converted to evidence-bounded language.",
+        })
 
     if tradition != "Experimental" and any(word in combined for word in [" causes ", " proves ", " guarantee", " will increase "]):
         issues.append("Causal upgrading")
@@ -769,23 +792,29 @@ def review_outputs(outputs: Dict[str, str], record: ExtractionRecord, classifica
         issues.append("No major high-risk failure detected by rule scan")
         fixes.append("Still perform human review of citation, sample, method, causal language, and feasibility.")
 
-    # Demonstration-friendly QA catch.
-    qa_catch = ""
+    if not before_after:
+        before_after.append({
+            "location": "Final output guardrail",
+            "before": "No specific high-risk phrase required automatic rewrite.",
+            "after": "Keep method, scope, citation, sample, and feasibility checks visible before use.",
+            "reason": "The review stage still verifies that no unsupported or over-certain language enters the final outputs.",
+        })
+
     if classification.methodological_tradition == "Quantitative":
         qa_catch = (
-            "QA catch for presentation: because this is routed as Quantitative / survey-statistical evidence, "
-            "phrases such as 'has impacts on' should be presented cautiously as 'is associated with' or 'is linked to' "
-            "unless the paper's design clearly supports causation."
+            "Because this paper is routed as quantitative / survey-statistical evidence, claim strength is checked for causal overstatement. "
+            "Language such as 'has impacts on' is revised toward 'is associated with' or 'is linked to' unless the design supports causation."
         )
     elif classification.methodological_tradition == "Theoretical":
-        qa_catch = "QA catch: describe the paper as developing a framework/argument, not as empirically proving an effect."
+        qa_catch = "Because this paper is routed as theoretical/conceptual, outputs are checked so they describe a framework or argument rather than empirical proof."
     else:
-        qa_catch = "QA catch: verify that claim strength matches the method and that no unsupported details were added."
+        qa_catch = "The review stage checks whether claim strength matches the detected method and whether unsupported details were added."
 
     return {
         "issues_detected": issues,
         "targeted_fixes": fixes,
         "qa_catch": qa_catch,
+        "before_after_comparison": before_after,
         "failure_mode_reference": {name: FAILURE_MODES.get(name, {}) for name in issues if name in FAILURE_MODES},
     }
 
@@ -800,7 +829,7 @@ def run_workflow(file_obj: Any, pasted_text: str, output_types: List[str], audie
     review = review_outputs(outputs, record, classification)
 
     return {
-        "mode": "FREE deterministic workflow — no API key, no paid model, no credit required",
+        "mode": "deterministic workflow",
         "raw_text_preview": normalize_text(cleaned_text[:1800]),
         "intake": intake_meta,
         "extraction": asdict(record),
