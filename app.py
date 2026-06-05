@@ -102,7 +102,15 @@ def render_stage(trace: Dict[str, Any] | None, stage: str) -> str:
         {header}<div style='height:12px'></div>{progress}
         <div class='stage-card'>
           <h3>Structured extraction record</h3>
-          <p><strong>Paper:</strong> {esc(ex.get('citation_hint'))}</p>
+          <table>
+            <tr><th>Title</th><td>{esc(ex.get('paper_title'))}</td></tr>
+            <tr><th>Author(s)</th><td>{esc(ex.get('authors'))}</td></tr>
+            <tr><th>Publication year</th><td>{esc(ex.get('publication_year'))}</td></tr>
+            <tr><th>Publication venue</th><td>{esc(ex.get('publication_venue'))}</td></tr>
+            <tr><th>Publication period</th><td>{esc(ex.get('publication_period'))}</td></tr>
+            <tr><th>DOI</th><td>{esc(ex.get('doi'))}</td></tr>
+          </table>
+          <p><strong>APA-style citation draft:</strong> {esc(ex.get('citation_apa'))}</p>
           <p><strong>Research objective:</strong> {esc(ex.get('research_objective'))}</p>
           <p><strong>Method / design:</strong> {esc(ex.get('method_design'))}</p>
           <p><strong>Sample / context:</strong> {esc(ex.get('sample_context'))}</p>
@@ -110,7 +118,7 @@ def render_stage(trace: Dict[str, Any] | None, stage: str) -> str:
           <p><strong>Key finding:</strong> {esc(ex.get('key_findings'))}</p>
           <p><strong>Limits / boundaries:</strong> {esc(ex.get('limitations_or_boundaries'))}</p>
           <p><strong>What the paper does not prove:</strong> {esc(ex.get('what_the_paper_does_not_prove'))}</p>
-          <p><strong>Presenter line:</strong> “This extraction sheet becomes the evidence boundary for every generated output.”</p>
+          <p><strong>Presenter line:</strong> “This extraction sheet captures citation metadata first, then method, sample, findings, and evidence limits.”</p>
         </div>
         """
     elif stage == "classify":

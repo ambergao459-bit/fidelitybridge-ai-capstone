@@ -25,6 +25,12 @@ MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "90000"))
 @dataclass
 class ExtractionRecord:
     paper_title: str
+    authors: str
+    publication_year: str
+    publication_venue: str
+    publication_period: str
+    doi: str
+    citation_apa: str
     citation_hint: str
     research_objective: str
     method_design: str
@@ -45,11 +51,40 @@ class ClassificationRecord:
     recommended_guardrails: List[str]
 
 
-def normalize_text(text: str) -> str:
+def clean_pdf_artifacts(text: str) -> str:
+    """Clean common PDF extraction artifacts without changing meaning."""
     text = text.replace("\x00", " ")
     text = re.sub(r"[\u00ad\u200b\ufeff]", "", text)
+    # PDF line wrapping often turns one word into fragments such as under- stand.
+    text = re.sub(r"(?<=\w)-\s+(?=\w)", "", text)
+    text = re.sub(r"(?<=\w)\s+-\s+(?=\w)", "", text)
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    # Fix occasional PDF character splitting inside title words, e.g., T ool -> Tool.
+    text = re.sub(r"\b([B-HJ-Z])\s+([a-z]{2,})\b", r"\1\2", text)
+    text = re.sub(r"([({\[] )", lambda m: m.group(1).strip(), text)
+    return text
+
+
+def normalize_text(text: str) -> str:
+    text = clean_pdf_artifacts(text)
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def short_excerpt(text: str, max_chars: int = 520, max_sentences: int = 3) -> str:
+    """Return a classroom-friendly excerpt instead of dumping a long PDF paragraph."""
+    text = normalize_text(text)
+    if not text:
+        return ""
+    sentences = split_sentences(text) if len(text) > 80 else [text]
+    if sentences:
+        out = " ".join(sentences[:max_sentences])
+    else:
+        out = text
+    out = out[:max_chars].strip()
+    if len(out) >= max_chars - 1 and " " in out:
+        out = out.rsplit(" ", 1)[0] + "..."
+    return out
 
 
 def read_pdf(path: str) -> str:
@@ -131,7 +166,7 @@ def split_sentences(text: str) -> List[str]:
 
 def detect_title(text: str) -> str:
     before_abstract = text.split("Abstract", 1)[0][:2500]
-    lines = [re.sub(r"\s+", " ", line).strip() for line in before_abstract.splitlines() if line.strip()]
+    lines = [re.sub(r"\s+", " ", clean_pdf_artifacts(line)).strip() for line in before_abstract.splitlines() if line.strip()]
     cleaned = []
     skip_terms = ["sage open", "doi", "journal", "creative commons", "original research", "author", "email", "page", "vol", "issue"]
     for line in lines:
@@ -142,13 +177,109 @@ def detect_title(text: str) -> str:
             continue
         if 8 <= len(line) <= 180:
             cleaned.append(line)
-    # Prefer lines with title-like words near abstract.
+    # Prefer the title lines immediately before Abstract; remove a likely author line.
     candidates = cleaned[-6:]
-    title = " ".join(candidates[:3]) if candidates else "Untitled paper"
-    title = re.sub(r"\b[A-Z][a-z]+\s+and\s+[A-Z][a-z]+\b.*$", "", title).strip()
+    if candidates and (re.search(r"\d", candidates[-1]) or re.search(r"\b[A-Z][a-z]+\s+and\s+[A-Z][a-z]+", candidates[-1])):
+        candidates = candidates[:-1]
+    title_lines = candidates[-4:] if len(candidates) >= 4 else candidates
+    title = " ".join(title_lines) if title_lines else "Untitled paper"
+    title = normalize_text(title)
     if len(title) > 220:
         title = title[:220].rsplit(" ", 1)[0] + "..."
     return title or "Untitled paper"
+
+
+def _front_matter_lines(text: str, max_chars: int = 3500) -> List[str]:
+    """Return cleaned first-page/front-matter lines for citation extraction."""
+    front = text.split("Abstract", 1)[0][:max_chars]
+    lines = []
+    for line in front.splitlines():
+        line = normalize_text(line)
+        if line:
+            lines.append(line)
+    return lines
+
+
+def detect_doi(text: str) -> str:
+    match = re.search(r"\b10\.\d{4,9}/[-._;()/:A-Z0-9]+", text, flags=re.IGNORECASE)
+    return match.group(0).rstrip(".);,") if match else "DOI not detected automatically"
+
+
+def detect_publication_year(text: str) -> str:
+    # Prefer a year near the journal header / DOI / copyright area.
+    front = normalize_text(text[:3500])
+    years = re.findall(r"\b(20\d{2}|19\d{2})\b", front)
+    if years:
+        return years[0]
+    years = re.findall(r"\b(20\d{2}|19\d{2})\b", text[:12000])
+    return years[0] if years else "Year not detected automatically"
+
+
+def detect_publication_period(text: str) -> str:
+    front = normalize_text(text[:2500])
+    match = re.search(r"\b(January|February|March|April|May|June|July|August|September|October|November|December)(?:\s*[-–]\s*(January|February|March|April|May|June|July|August|September|October|November|December))?\s+(20\d{2}|19\d{2})\b", front, flags=re.IGNORECASE)
+    if match:
+        return match.group(0)
+    return "Publication period not detected automatically"
+
+
+def detect_publication_venue(text: str) -> str:
+    lines = _front_matter_lines(text)
+    venue_candidates = []
+    for line in lines[:20]:
+        low = line.lower()
+        if "doi" in low or "page" in low or "author" in low or "copyright" in low:
+            continue
+        if any(token in low for token in ["journal", "review", "administration", "policy", "sage open", "public management"]):
+            if 3 <= len(line) <= 90:
+                venue_candidates.append(line)
+    # Special common case for the demo paper.
+    for line in lines[:20]:
+        if line.lower().strip() == "sage open":
+            return "SAGE Open"
+    return venue_candidates[0] if venue_candidates else "Publication venue not detected automatically"
+
+
+def detect_authors(text: str, title: str) -> str:
+    lines = _front_matter_lines(text)
+    # Try the line immediately after the detected title block.
+    norm_title = normalize_text(title).lower()
+    joined_progress = ""
+    for idx, line in enumerate(lines):
+        joined_progress = normalize_text((joined_progress + " " + line)[-max(len(norm_title) + 200, 260):]).lower()
+        if norm_title and norm_title[:60] in joined_progress:
+            for cand in lines[idx + 1: idx + 6]:
+                cand_clean = re.sub(r"(?<=[A-Za-z])\d+\b|\b\d+\b", "", cand).strip(" ,;.")
+                cand_clean = normalize_text(cand_clean)
+                low = cand_clean.lower()
+                if not cand_clean or any(skip in low for skip in ["abstract", "keywords", "doi", "journal", "sage open", "creative commons", "corresponding author"]):
+                    continue
+                if re.search(r"\b(and|,|&|\bet\s+al\.)\b", cand_clean, flags=re.IGNORECASE) and re.search(r"[A-Z][a-z]+", cand_clean):
+                    return cand_clean
+    # Fallback: a front-matter line with two likely personal names joined by and/comma.
+    for line in lines[:25]:
+        cand = re.sub(r"(?<=[A-Za-z])\d+\b|\b\d+\b", "", line).strip(" ,;.")
+        cand = normalize_text(cand)
+        if len(cand) > 100:
+            continue
+        if re.search(r"^[A-Z][A-Za-z'.-]+\s+[A-Z][A-Za-z'.-]+(?:\s*(?:,|and|&)\s*[A-Z][A-Za-z'.-]+\s+[A-Z][A-Za-z'.-]+)+", cand):
+            return cand
+    return "Authors not detected automatically"
+
+
+def build_citation_apa(authors: str, year: str, title: str, venue: str, doi: str) -> str:
+    parts = []
+    if authors and not authors.startswith("Authors not"):
+        parts.append(authors)
+    else:
+        parts.append("Author(s) not detected")
+    parts.append(f"({year})." if year and not year.startswith("Year not") else "(n.d.).")
+    parts.append(title.rstrip(".") + "." if title else "Untitled paper.")
+    if venue and not venue.startswith("Publication venue not"):
+        parts.append(venue.rstrip(".") + ".")
+    if doi and not doi.startswith("DOI not"):
+        parts.append(f"https://doi.org/{doi}")
+    return " ".join(parts)
 
 
 def extract_abstract(text: str) -> str:
@@ -182,10 +313,16 @@ def detect_method(text: str, abstract: str, keywords: List[str]) -> str:
         return "Systematic review"
     if "mixed methods" in low or ("interview" in low and "survey" in low):
         return "Mixed-methods design"
-    if any(k in low for k in ["randomized", "randomised", "experiment", "treatment group", "control group"]):
-        return "Experimental or quasi-experimental design"
-    if any(k in low for k in ["survey", "questionnaire", "respondents", "sem", "structural equation", "path analysis", "regression", "cfa", "likert"]):
+
+    survey_signal = any(k in low for k in ["survey", "questionnaire", "respondents", "sem", "structural equation", "path analysis", "regression", "cfa", "likert", "cronbach"])
+    experimental_signal = any(k in low for k in ["randomized", "randomised", "random assignment", "treatment group", "control group", "quasi-experiment", "field experiment", "lab experiment"])
+
+    # Many public-administration papers use the word empirical or mention policy experiments as context.
+    # If survey/SEM evidence is present, classify the design as quantitative instead of experimental.
+    if survey_signal:
         return "Quantitative survey/statistical analysis"
+    if experimental_signal:
+        return "Experimental or quasi-experimental design"
     if any(k in low for k in ["interview", "focus group", "thematic", "qualitative", "ethnograph"]):
         return "Qualitative study"
     if any(k in low for k in ["conceptual", "framework", "theoretical", "theory"]):
@@ -255,15 +392,30 @@ def detect_key_findings(abstract: str, text: str) -> str:
 
 
 def detect_limitations(text: str) -> str:
-    lim = find_between(text, "limitation", ["conclusion", "references", "appendix"], 1200)
-    if lim:
-        return lim[:500]
-    conclusion = find_between(text, "Conclusion", ["References", "Appendix"], 1400)
+    # Prefer a late limitations section. Earlier mentions are often abstract keywords or literature review text.
+    lower = text.lower()
+    candidates = list(re.finditer(r"\blimitations?(?:\s+and\s+(?:conclusion|future research))?\b", text, flags=re.IGNORECASE))
+    start = None
+    if candidates:
+        late_candidates = [m for m in candidates if m.start() > len(text) * 0.35]
+        match = late_candidates[-1] if late_candidates else candidates[-1]
+        start = match.end()
+    if start is not None:
+        end = len(text)
+        for pat in ["References", "Appendix", "Funding", "Declaration", "Conclusion"]:
+            pos = lower.find(pat.lower(), start)
+            if pos > start and pos < end:
+                end = pos
+        excerpt = short_excerpt(text[start:end], max_chars=520, max_sentences=3)
+        if excerpt and len(excerpt) > 30:
+            return excerpt
+
+    conclusion = find_between(text, "Conclusion", ["References", "Appendix", "Funding", "Declaration"], 2000)
     if conclusion:
         sentences = split_sentences(conclusion)
-        risk_sents = [s for s in sentences if any(t in s.lower() for t in ["limit", "future", "caution", "context", "generaliz", "sample"])]
+        risk_sents = [sent for sent in sentences if any(t in sent.lower() for t in ["limit", "future", "caution", "context", "generaliz", "sample", "bias", "should not"])]
         if risk_sents:
-            return " ".join(risk_sents[:2])[:500]
+            return short_excerpt(" ".join(risk_sents[:3]), max_chars=520, max_sentences=3)
     return "No explicit limitation section was automatically captured; use method, sample, and context as boundaries."
 
 
@@ -290,16 +442,25 @@ def make_extraction_record(text: str) -> ExtractionRecord:
     method = detect_method(text, abstract, keywords)
     sample = detect_sample(text)
     title = detect_title(text)
+    authors = detect_authors(text, title)
+    year = detect_publication_year(text)
+    venue = detect_publication_venue(text)
+    period = detect_publication_period(text)
+    doi = detect_doi(text)
+    citation_apa = build_citation_apa(authors, year, title, venue, doi)
     objective = detect_research_objective(abstract, text)
     findings = detect_key_findings(abstract, text)
     limitations = detect_limitations(text)
     boundary = boundary_from_method(method, sample)
-    citation_hint = title
-    if re.search(r"\b20\d{2}\b", text[:1000]):
-        year = re.search(r"\b20\d{2}\b", text[:1000]).group(0)
-        citation_hint = f"{title} ({year})"
+    citation_hint = f"{authors} ({year})" if not authors.startswith("Authors not") and not year.startswith("Year not") else citation_apa
     return ExtractionRecord(
         paper_title=title,
+        authors=authors,
+        publication_year=year,
+        publication_venue=venue,
+        publication_period=period,
+        doi=doi,
+        citation_apa=citation_apa,
         citation_hint=citation_hint,
         research_objective=objective,
         method_design=method,

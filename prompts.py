@@ -67,7 +67,7 @@ SCHEMAS = {
 
 STAGE_PROMPTS = {
     "intake": "Intake prompt: parse the uploaded paper, identify visible citation clues, abstract, section headings, file size, and source text quality. Do not generate outputs yet.",
-    "extract": "Extraction prompt: create a source-bound record with citation, research objective, method/design, sample/context, key findings, limits, and what the paper does not prove.",
+    "extract": "Extraction prompt: create a source-bound record with title, authors, year, venue, DOI/citation clues, research objective, method/design, sample/context, key findings, limits, and what the paper does not prove.",
     "classify": "Classification prompt: classify methodological tradition and route the paper to method-aware generation and QA rules.",
     "generate": "Generation prompt: generate only 1-2 requested output types from the extraction record and output schema. Preserve method, scope, and evidence boundaries.",
     "score": "Scoring prompt: score each output across D1-D7 with a 1-5 score, concise reason, weakest dimension, and targeted revision rule.",
