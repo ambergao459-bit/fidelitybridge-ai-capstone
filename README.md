@@ -1,50 +1,39 @@
----
-title: FidelityBridge AI
-emoji: 🧭
-colorFrom: blue
-colorTo: green
-sdk: gradio
-sdk_version: 4.44.1
-app_file: app.py
-pinned: false
-license: mit
----
+# FidelityBridge AI — Free Workflow Demo
 
-# FidelityBridge AI
+This version is built for a classroom Capstone live demonstration when API credits are unavailable.
 
-FidelityBridge AI is an interactive Capstone demo system for translating public-administration research papers into practitioner-ready outputs while preserving evidence fidelity.
+It uses no paid OpenAI API call. The workflow is deterministic and interactive:
 
-It is built around the required visible workflow:
+1. Intake / Parse
+2. Extract Evidence
+3. Classify + Route
+4. Generate 1-2 Outputs
+5. Score D1-D7
+6. Review / QA Fix
 
-1. Intake / parse uploaded paper
-2. Extract a structured evidence record
-3. Classify methodological tradition and route guardrails
-4. Show the actual generation prompt
-5. Generate 1-2 output types
-6. Score D1-D7 fidelity dimensions
-7. Catch and fix one failure mode
-
-The interface is designed for both the prepared trace demo and the out-of-sample live Q&A paper.
-
-## Local Quick Start
+## Local run
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-cp .env.example .env
-# edit .env and add OPENAI_API_KEY
 python app.py
 ```
 
-Then open the local Gradio URL shown in the terminal.
+## Render deployment
 
-## Required Secret
+Build command:
 
-Set `OPENAI_API_KEY` for real analysis. Without it, the app still opens and runs a transparent rule-based fallback, but the fallback is not recommended for your graded live demo.
+```bash
+pip install -r requirements.txt
+```
 
-## Presenter Use
+Start command:
 
-For the prepared trace, upload your prepared e-government paper and click each stage one by one so the audience sees every intermediate result. For the out-of-sample paper, upload the instructor's file and run the same stages live.
+```bash
+python app.py
+```
 
-Do not generate all 18 outputs during the demo. Select only 1-2 outputs, then score them on D1-D7.
+No `OPENAI_API_KEY` is required.
+
+## What to tell the instructor
+
+This is not one mega-prompt. It is an automated, staged workflow that makes each intermediate record visible. It uses rule-based extraction, method-aware routing, output schemas, D1-D7 scoring, and QA failure-mode checks.

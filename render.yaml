@@ -1,14 +1,10 @@
 services:
   - type: web
-    name: fidelitybridge-ai
+    name: fidelitybridge-ai-free
     env: python
     plan: free
     buildCommand: pip install -r requirements.txt
     startCommand: python app.py
     envVars:
-      - key: OPENAI_MODEL
-        value: gpt-4o-mini
-      - key: MAX_CHARS_FOR_LLM
-        value: "45000"
-      - key: OPENAI_API_KEY
-        sync: false
+      - key: MAX_TEXT_CHARS
+        value: "90000"

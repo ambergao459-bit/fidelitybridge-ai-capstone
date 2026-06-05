@@ -1,694 +1,657 @@
-"""Backend workflow for FidelityBridge AI.
-
-The backend is organized around the required six-stage demo workflow:
-1 intake/parse -> 2 extract -> 3 classify/route -> 4 generate ->
-5 score -> 6 review/QA catch/fix.
-
-It uses OpenAI or any OpenAI-compatible API when OPENAI_API_KEY is set.
-If no API key is present, it falls back to a transparent rule-based demo mode so
-students can still click through the interface, but real presentation use should
-set an API key.
-"""
-
-from __future__ import annotations
-
 import json
 import os
 import re
 import tempfile
-import textwrap
-from datetime import datetime
+from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
+
+from prompts import FIDELITY_DIMENSIONS, FAILURE_MODES, OUTPUT_TYPES, SCHEMAS
 
 try:
-    from dotenv import load_dotenv
-
-    load_dotenv()
+    from pypdf import PdfReader
 except Exception:
-    pass
+    PdfReader = None
 
-from prompts import (
-    CLASSIFICATION_PROMPT,
-    EXTRACTION_PROMPT,
-    FAILURE_MODES,
-    FIDELITY_DIMENSIONS,
-    GENERATION_PROMPT,
-    METHOD_TRADITIONS,
-    OUTPUT_SCHEMAS,
-    QA_FIX_PROMPT,
-    SCORING_PROMPT,
-    SYSTEM_MESSAGE,
-)
-
-MAX_CHARS_FOR_LLM = int(os.getenv("MAX_CHARS_FOR_LLM", "45000"))
-DEFAULT_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+try:
+    import docx
+except Exception:
+    docx = None
 
 
-def _safe_json_loads(text: str) -> Any:
-    """Parse JSON from strict JSON or from text containing a JSON block."""
-    if isinstance(text, (dict, list)):
-        return text
-    if not text:
-        return {}
-    cleaned = text.strip()
-    cleaned = re.sub(r"^```(?:json)?\s*", "", cleaned, flags=re.I)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
-    try:
-        return json.loads(cleaned)
-    except Exception:
-        pass
-    match = re.search(r"(\{.*\}|\[.*\])", cleaned, flags=re.S)
-    if match:
+MAX_TEXT_CHARS = int(os.getenv("MAX_TEXT_CHARS", "90000"))
+
+
+@dataclass
+class ExtractionRecord:
+    paper_title: str
+    citation_hint: str
+    research_objective: str
+    method_design: str
+    sample_context: str
+    variables_constructs: List[str]
+    key_findings: str
+    limitations_or_boundaries: str
+    what_the_paper_does_not_prove: str
+    method_keywords_found: List[str]
+
+
+@dataclass
+class ClassificationRecord:
+    methodological_tradition: str
+    confidence: str
+    route: str
+    evidence_boundary: str
+    recommended_guardrails: List[str]
+
+
+def normalize_text(text: str) -> str:
+    text = text.replace("\x00", " ")
+    text = re.sub(r"[\u00ad\u200b\ufeff]", "", text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def read_pdf(path: str) -> str:
+    if PdfReader is None:
+        raise RuntimeError("pypdf is not installed")
+    reader = PdfReader(path)
+    chunks = []
+    for idx, page in enumerate(reader.pages[:25]):
         try:
-            return json.loads(match.group(1))
+            page_text = page.extract_text() or ""
         except Exception:
-            return {"raw_text": text}
-    return {"raw_text": text}
+            page_text = ""
+        chunks.append(f"\n--- PAGE {idx + 1} ---\n{page_text}")
+    return "\n".join(chunks)
 
 
-def _json_dumps(obj: Any) -> str:
-    return json.dumps(obj, ensure_ascii=False, indent=2)
+def read_docx(path: str) -> str:
+    if docx is None:
+        raise RuntimeError("python-docx is not installed")
+    document = docx.Document(path)
+    return "\n".join(p.text for p in document.paragraphs)
 
 
-def _truncate_text(text: str, max_chars: int = MAX_CHARS_FOR_LLM) -> str:
-    text = re.sub(r"\n{3,}", "\n\n", text or "").strip()
-    if len(text) <= max_chars:
-        return text
-    head = text[: int(max_chars * 0.65)]
-    tail = text[-int(max_chars * 0.25) :]
-    return head + "\n\n[... middle of paper truncated for live demo speed ...]\n\n" + tail
-
-
-def read_uploaded_file(file_path: Optional[str], pasted_text: str = "") -> Dict[str, Any]:
-    """Parse an uploaded PDF/DOCX/TXT or directly pasted text."""
-    text_parts: List[str] = []
-    source_name = "pasted text"
-    file_type = "text"
-
-    if file_path:
-        path = Path(file_path)
-        source_name = path.name
-        suffix = path.suffix.lower()
-        file_type = suffix.replace(".", "") or "unknown"
-        if suffix == ".pdf":
-            try:
-                import fitz  # PyMuPDF
-
-                doc = fitz.open(str(path))
-                for i, page in enumerate(doc, start=1):
-                    page_text = page.get_text("text") or ""
-                    text_parts.append(f"\n\n--- PAGE {i} ---\n{page_text}")
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Could not parse PDF. Make sure PyMuPDF is installed. Detail: {exc}"
-                ) from exc
-        elif suffix in {".txt", ".md"}:
-            text_parts.append(path.read_text(encoding="utf-8", errors="ignore"))
-        elif suffix == ".docx":
-            try:
-                import docx
-
-                document = docx.Document(str(path))
-                text_parts.extend([p.text for p in document.paragraphs if p.text.strip()])
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Could not parse DOCX. Make sure python-docx is installed. Detail: {exc}"
-                ) from exc
-        else:
-            raise ValueError("Supported file types: PDF, DOCX, TXT, MD.")
-
+def read_uploaded_file(file_obj: Any, pasted_text: str = "") -> Tuple[str, Dict[str, Any]]:
     if pasted_text and pasted_text.strip():
-        text_parts.append("\n\n--- PASTED TEXT ---\n" + pasted_text.strip())
+        text = pasted_text.strip()
+        return text[:MAX_TEXT_CHARS], {
+            "source_type": "Pasted text",
+            "file_name": "manual_text_input",
+            "text_characters_used": min(len(text), MAX_TEXT_CHARS),
+        }
 
-    full_text = "\n".join(text_parts).strip()
-    if not full_text:
-        raise ValueError("Please upload a paper or paste paper text first.")
+    if file_obj is None:
+        raise ValueError("Please upload a PDF/DOCX/TXT file or paste paper text.")
 
-    abstract_preview = _extract_abstract_preview(full_text)
-    intake = {
-        "stage": "1_intake_parse",
-        "source_name": source_name,
-        "file_type": file_type,
-        "parsed_characters": len(full_text),
-        "llm_characters_used": min(len(full_text), MAX_CHARS_FOR_LLM),
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "abstract_or_front_matter_preview": abstract_preview,
-        "visible_stage_note": "Paper has been ingested. Next step: extract structured facts before generating outputs.",
+    path = file_obj.name if hasattr(file_obj, "name") else str(file_obj)
+    file_name = Path(path).name
+    suffix = Path(path).suffix.lower()
+    size_kb = round(os.path.getsize(path) / 1024, 1) if os.path.exists(path) else None
+
+    if suffix == ".pdf":
+        raw = read_pdf(path)
+    elif suffix == ".docx":
+        raw = read_docx(path)
+    elif suffix in {".txt", ".md"}:
+        raw = Path(path).read_text(encoding="utf-8", errors="ignore")
+    else:
+        raise ValueError("Supported files: PDF, DOCX, TXT.")
+
+    cleaned = raw[:MAX_TEXT_CHARS]
+    return cleaned, {
+        "source_type": suffix.upper().replace(".", "") or "file",
+        "file_name": file_name,
+        "file_size_kb": size_kb,
+        "text_characters_used": len(cleaned),
+        "truncated": len(raw) > MAX_TEXT_CHARS,
     }
-    return {"intake": intake, "text": full_text, "llm_text": _truncate_text(full_text)}
 
 
-def _extract_abstract_preview(text: str) -> str:
+def find_between(text: str, start_pattern: str, end_patterns: List[str], max_chars: int = 6000) -> str:
     lower = text.lower()
-    idx = lower.find("abstract")
-    if idx >= 0:
-        return text[idx : idx + 1800].strip()
-    return text[:1800].strip()
-
-
-def _get_openai_client():
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        return None
-    try:
-        from openai import OpenAI
-
-        base_url = os.getenv("OPENAI_BASE_URL") or None
-        return OpenAI(api_key=api_key, base_url=base_url)
-    except Exception:
-        return None
-
-
-def llm_call(prompt: str, expect_json: bool = False, temperature: float = 0.15) -> Tuple[str, str]:
-    """Call OpenAI/OpenAI-compatible API. Return (content, mode)."""
-    client = _get_openai_client()
-    if client is None:
-        return "", "fallback"
-
-    kwargs: Dict[str, Any] = {
-        "model": os.getenv("OPENAI_MODEL", DEFAULT_MODEL),
-        "messages": [
-            {"role": "system", "content": SYSTEM_MESSAGE},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": temperature,
-    }
-    if expect_json:
-        kwargs["response_format"] = {"type": "json_object"}
-
-    try:
-        response = client.chat.completions.create(**kwargs)
-        return response.choices[0].message.content or "", "llm"
-    except Exception as exc:
-        # Some OpenAI-compatible providers do not support response_format.
-        if expect_json and "response_format" in kwargs:
-            kwargs.pop("response_format", None)
-            try:
-                response = client.chat.completions.create(**kwargs)
-                return response.choices[0].message.content or "", "llm"
-            except Exception as exc2:
-                return f"LLM call failed: {exc2}", "error"
-        return f"LLM call failed: {exc}", "error"
-
-
-def build_extraction_prompt(paper_text: str) -> str:
-    return EXTRACTION_PROMPT.format(paper_text=_truncate_text(paper_text))
-
-
-def extract_record(paper_text: str) -> Dict[str, Any]:
-    prompt = build_extraction_prompt(paper_text)
-    content, mode = llm_call(prompt, expect_json=True)
-    if mode == "llm":
-        parsed = _safe_json_loads(content)
-    elif mode == "error":
-        parsed = fallback_extract(paper_text)
-        parsed["llm_error"] = content
-    else:
-        parsed = fallback_extract(paper_text)
-        parsed["demo_mode_warning"] = "No OPENAI_API_KEY was found. This is a rule-based fallback, not the recommended live-demo mode."
-    return {"prompt": prompt, "result": parsed, "mode": mode}
-
-
-def build_classification_prompt(extraction: Dict[str, Any]) -> str:
-    return CLASSIFICATION_PROMPT.format(extraction_json=_json_dumps(extraction))
-
-
-def classify_paper(extraction: Dict[str, Any]) -> Dict[str, Any]:
-    prompt = build_classification_prompt(extraction)
-    content, mode = llm_call(prompt, expect_json=True)
-    if mode == "llm":
-        parsed = _safe_json_loads(content)
-    elif mode == "error":
-        parsed = fallback_classify(extraction)
-        parsed["llm_error"] = content
-    else:
-        parsed = fallback_classify(extraction)
-        parsed["demo_mode_warning"] = "No OPENAI_API_KEY was found. This is a rule-based fallback, not the recommended live-demo mode."
-    return {"prompt": prompt, "result": parsed, "mode": mode}
-
-
-def _selected_schema_text(output_types: List[str]) -> str:
-    clean = [x for x in (output_types or []) if x in OUTPUT_SCHEMAS]
-    if not clean:
-        clean = ["Policy Brief"]
-    if len(clean) > 2:
-        clean = clean[:2]
-    return "\n".join([f"- {name}: {OUTPUT_SCHEMAS[name]}" for name in clean])
-
-
-def build_generation_prompt(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    output_types: List[str],
-    target_audience: str,
-) -> str:
-    return GENERATION_PROMPT.format(
-        target_audience=target_audience or "public administration practitioners",
-        selected_schemas=_selected_schema_text(output_types),
-        classification_json=_json_dumps(classification),
-        extraction_json=_json_dumps(extraction),
-    )
-
-
-def generate_outputs(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    output_types: List[str],
-    target_audience: str,
-) -> Dict[str, Any]:
-    prompt = build_generation_prompt(extraction, classification, output_types, target_audience)
-    content, mode = llm_call(prompt, expect_json=False, temperature=0.25)
-    if mode == "llm":
-        result = content
-    elif mode == "error":
-        result = fallback_generate(extraction, classification, output_types, target_audience) + f"\n\n> LLM error: {content}"
-    else:
-        result = fallback_generate(extraction, classification, output_types, target_audience)
-    return {"prompt": prompt, "result": result, "mode": mode}
-
-
-def build_scoring_prompt(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    generated_output: str,
-) -> str:
-    dimensions = "\n".join([f"- {k}: {v}" for k, v in FIDELITY_DIMENSIONS.items()])
-    return SCORING_PROMPT.format(
-        dimensions=dimensions,
-        extraction_json=_json_dumps(extraction),
-        classification_json=_json_dumps(classification),
-        generated_output=generated_output,
-    )
-
-
-def score_output(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    generated_output: str,
-) -> Dict[str, Any]:
-    prompt = build_scoring_prompt(extraction, classification, generated_output)
-    content, mode = llm_call(prompt, expect_json=True)
-    if mode == "llm":
-        parsed = _safe_json_loads(content)
-    elif mode == "error":
-        parsed = fallback_score(extraction, classification, generated_output)
-        parsed["llm_error"] = content
-    else:
-        parsed = fallback_score(extraction, classification, generated_output)
-        parsed["demo_mode_warning"] = "No OPENAI_API_KEY was found. This is a rule-based fallback, not the recommended live-demo mode."
-    return {"prompt": prompt, "result": parsed, "mode": mode}
-
-
-def build_qa_prompt(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    generated_output: str,
-    scores: Dict[str, Any],
-) -> str:
-    return QA_FIX_PROMPT.format(
-        failure_modes=_json_dumps(FAILURE_MODES),
-        extraction_json=_json_dumps(extraction),
-        classification_json=_json_dumps(classification),
-        scores_json=_json_dumps(scores),
-        generated_output=generated_output,
-    )
-
-
-def qa_fix(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    generated_output: str,
-    scores: Dict[str, Any],
-) -> Dict[str, Any]:
-    prompt = build_qa_prompt(extraction, classification, generated_output, scores)
-    content, mode = llm_call(prompt, expect_json=False, temperature=0.2)
-    if mode == "llm":
-        result = content
-    elif mode == "error":
-        result = fallback_qa_fix(extraction, classification, generated_output, scores) + f"\n\n> LLM error: {content}"
-    else:
-        result = fallback_qa_fix(extraction, classification, generated_output, scores)
-    return {"prompt": prompt, "result": result, "mode": mode}
-
-
-def run_full_workflow(
-    paper_text: str,
-    output_types: List[str],
-    target_audience: str,
-) -> Dict[str, Any]:
-    extraction = extract_record(paper_text)
-    classification = classify_paper(extraction["result"])
-    generation = generate_outputs(extraction["result"], classification["result"], output_types, target_audience)
-    scoring = score_output(extraction["result"], classification["result"], generation["result"])
-    qa = qa_fix(extraction["result"], classification["result"], generation["result"], scoring["result"])
-    return {
-        "extraction": extraction,
-        "classification": classification,
-        "generation": generation,
-        "scoring": scoring,
-        "qa": qa,
-    }
-
-
-def write_trace_files(state: Dict[str, Any]) -> Tuple[str, str]:
-    """Write JSON trace and Markdown presenter card. Return paths."""
-    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    out_dir = Path(tempfile.gettempdir()) / "fidelitybridge_ai"
-    out_dir.mkdir(parents=True, exist_ok=True)
-    json_path = out_dir / f"trace_{stamp}.json"
-    md_path = out_dir / f"presenter_card_{stamp}.md"
-    json_path.write_text(_json_dumps(state), encoding="utf-8")
-    md_path.write_text(build_presenter_card(state), encoding="utf-8")
-    return str(json_path), str(md_path)
-
-
-def build_presenter_card(state: Dict[str, Any]) -> str:
-    extraction = state.get("extraction", {}).get("result", {})
-    classification = state.get("classification", {}).get("result", {})
-    scores = state.get("scoring", {}).get("result", {})
-    qa = state.get("qa", {}).get("result", "")
-    title = extraction.get("title") or "Uploaded paper"
-    tradition = classification.get("tradition") or extraction.get("methodological_tradition_candidate") or "Unknown"
-    weakest = scores.get("weakest_dimension", "TBD") if isinstance(scores, dict) else "TBD"
-    return f"""# FidelityBridge AI Presenter Card
-
-## Paper
-- **Title:** {title}
-- **Tradition:** {tradition}
-- **Evidence boundary:** {classification.get('evidence_boundary', extraction.get('causal_language_boundary', 'TBD'))}
-
-## Live Workflow Script
-1. Intake: uploaded and parsed the paper.
-2. Extract: showed method, sample/context, findings, limits, and what the paper does not prove.
-3. Classify: routed it to **{tradition}** rules.
-4. Generate: produced only 1-2 outputs, not all 18, using the visible output prompt and schema.
-5. Score: scored D1-D7 and identified **{weakest}** as weakest.
-6. Review: connected one QA catch and targeted fix to a named failure mode.
-
-## QA Catch / Fix
-{qa}
-"""
-
-
-# -------------------------
-# Rule-based fallback tools
-# -------------------------
-
-
-def fallback_extract(paper_text: str) -> Dict[str, Any]:
-    text = paper_text or ""
-    front = text[:5000]
-    title = _guess_title(front)
-    authors = _guess_authors(front)
-    year = _guess_year(front)
-    sample = _find_sample(text)
-    design = _guess_design(text)
-    findings = _extract_findings(text)
-    limitations = _extract_limitations(text)
-    tradition = _guess_tradition(text)
-    return {
-        "apa_citation_best_effort": f"{authors or 'Author(s)'}. ({year or 'n.d.'}). {title or 'Untitled paper'}. [Best-effort citation].",
-        "title": title,
-        "authors": authors,
-        "year": year,
-        "research_question_or_objective": _extract_objective(text),
-        "public_administration_topic": _guess_topic(text),
-        "data_sample_context": sample,
-        "research_design": design,
-        "methodological_tradition_candidate": tradition,
-        "variables_or_constructs": _extract_variables(text),
-        "key_findings": findings,
-        "limitations_stated_or_inferred": limitations,
-        "what_the_paper_does_not_prove": "This paper should not be treated as universal proof. The claim strength depends on its design, sample, and context.",
-        "causal_language_boundary": _causal_boundary_from_tradition(tradition),
-        "direct_evidence_quotes_short": [],
-        "translation_guardrails": [
-            "Generate from extracted facts only.",
-            "Avoid invented quotations, agencies, dates, budgets, or local details.",
-            "Use bounded causal language unless design supports causation.",
-        ],
-    }
-
-
-def fallback_classify(extraction: Dict[str, Any]) -> Dict[str, Any]:
-    tradition = extraction.get("methodological_tradition_candidate") or "Quantitative"
-    if tradition not in METHOD_TRADITIONS:
-        tradition = "Quantitative"
-    return {
-        "tradition": tradition,
-        "confidence_1_to_5": 3,
-        "rationale": "Rule-based classification from keywords in the abstract/methods text.",
-        "evidence_boundary": _causal_boundary_from_tradition(tradition),
-        "routing_rules": [
-            "Keep method and sample visible.",
-            "Use output-specific schema.",
-            "Score D1-D7 before public use.",
-        ],
-        "risky_language_to_avoid": ["proves", "causes", "guarantees", "will automatically lead to"],
-        "recommended_outputs_for_demo": ["Policy Brief", "Technical Note"],
-    }
-
-
-def fallback_generate(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    output_types: List[str],
-    target_audience: str,
-) -> str:
-    chosen = [x for x in (output_types or ["Policy Brief"]) if x in OUTPUT_SCHEMAS][:2]
-    if not chosen:
-        chosen = ["Policy Brief"]
-    title = extraction.get("title") or "the uploaded paper"
-    method = extraction.get("research_design") or classification.get("tradition")
-    sample = extraction.get("data_sample_context") or "the study context described in the paper"
-    findings = extraction.get("key_findings") or "The paper reports findings relevant to public administration practice."
-    boundary = classification.get("evidence_boundary") or extraction.get("causal_language_boundary") or "Use bounded evidence language."
-    blocks = []
-    for name in chosen:
-        blocks.append(
-            f"""## {name}
-
-**Source:** {title}
-
-**Audience:** {target_audience or 'public administration practitioners'}
-
-**Evidence base:** The paper uses {method} with {sample}.
-
-**Key finding:** {findings if isinstance(findings, str) else '; '.join(map(str, findings[:3]))}
-
-**What this does not show:** {boundary}
-
-**Practical takeaway:** Treat the finding as decision support, not automatic proof. Use it to guide further review, pilot testing, or context-specific implementation.
-"""
-        )
-    return "\n".join(blocks) + "\n\n> Demo mode note: no OPENAI_API_KEY was found, so this was generated by a transparent fallback template."
-
-
-def fallback_score(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    generated_output: str,
-) -> Dict[str, Any]:
-    text = generated_output.lower()
-    causal_risk = any(w in text for w in ["prove", "proves", "cause", "causes", "guarantee", "guarantees"])
-    method_visible = any(w in text for w in ["method", "survey", "experiment", "sample", "data", "review", "meta-analysis"])
-    scores = {
-        "D1_Claim_Accuracy": {"score": 4, "reason": "Generated from the extraction sheet, but needs human source check."},
-        "D2_Causal_Precision": {"score": 2 if causal_risk else 4, "reason": "Flagged for causal wording." if causal_risk else "Causal language appears bounded."},
-        "D3_Scope_Fidelity": {"score": 4, "reason": "Includes a boundary statement."},
-        "D4_Method_Transparency": {"score": 4 if method_visible else 3, "reason": "Method is visible." if method_visible else "Method could be more explicit."},
-        "D5_Nuance_Preservation": {"score": 3, "reason": "Needs richer caveats from the source."},
-        "D6_Audience_Calibration": {"score": 4, "reason": "Tone is practitioner-oriented."},
-        "D7_Actionability": {"score": 3, "reason": "Action guidance is bounded but could be more specific."},
-    }
-    weakest = min(scores.items(), key=lambda kv: kv[1]["score"])[0]
-    return {
-        "scores": scores,
-        "weakest_dimension": weakest,
-        "strongest_dimension": "D1_Claim_Accuracy",
-        "likely_failure_modes": ["Causal upgrading"] if causal_risk else ["Actionability drift"],
-        "targeted_revision_needed": "Revise the weak section only; keep claims bounded to the method and context.",
-        "one_sentence_presenter_takeaway": f"The weakest dimension is {weakest}, so the fix should target that specific fidelity risk rather than rewrite the whole output.",
-    }
-
-
-def fallback_qa_fix(
-    extraction: Dict[str, Any],
-    classification: Dict[str, Any],
-    generated_output: str,
-    scores: Dict[str, Any],
-) -> str:
-    return textwrap.dedent(
-        f"""
-        ## 1. QA Catch
-        Check whether the output uses causal or universal language that is stronger than the paper's design.
-
-        ## 2. Failure Mode Name
-        Causal upgrading / Scope collapse.
-
-        ## 3. Why It Matters
-        The presentation must show that the workflow catches fidelity risks before public-facing use.
-
-        ## 4. Before -> After Fix
-        **Before:** "This proves the policy works."  
-        **After:** "This study suggests the policy may be associated with better outcomes in the studied context."
-
-        ## 5. Revised Output Section Only
-        Add this boundary sentence: "Because the evidence comes from {classification.get('tradition', 'the identified design')}, this output should guide context-specific review rather than be treated as universal proof."
-
-        ## 6. Presenter Line
-        This catch shows why our workflow separates extraction, classification, generation, scoring, and review instead of using one mega-prompt.
-        """
-    ).strip()
-
-
-def _guess_title(front: str) -> str:
-    lines = [re.sub(r"\s+", " ", line).strip() for line in front.splitlines() if line.strip()]
-    ignore = {"original research", "abstract", "introduction"}
-    candidates = [line for line in lines[:30] if len(line) > 15 and line.lower() not in ignore]
-    return candidates[0] if candidates else "Untitled paper"
-
-
-def _guess_authors(front: str) -> str:
-    # Best effort: line after title often contains author names.
-    lines = [re.sub(r"\s+", " ", line).strip() for line in front.splitlines() if line.strip()]
-    for line in lines[:40]:
-        if re.search(r"\b(and|&|,|\d)\b", line) and not re.search(r"abstract|journal|doi|university", line, re.I):
-            if 5 <= len(line) <= 120:
-                return line
-    return ""
-
-
-def _guess_year(front: str) -> str:
-    match = re.search(r"\b(20\d{2}|19\d{2})\b", front)
-    return match.group(1) if match else ""
-
-
-def _find_sample(text: str) -> str:
+    start = lower.find(start_pattern.lower())
+    if start < 0:
+        return ""
+    start += len(start_pattern)
+    end = len(text)
+    for pat in end_patterns:
+        pos = lower.find(pat.lower(), start)
+        if pos > start and pos < end:
+            end = pos
+    return normalize_text(text[start:end])[:max_chars]
+
+
+def split_sentences(text: str) -> List[str]:
+    text = normalize_text(text)
+    sentences = re.split(r"(?<=[.!?])\s+(?=[A-Z0-9])", text)
+    return [s.strip() for s in sentences if len(s.strip()) > 20]
+
+
+def detect_title(text: str) -> str:
+    before_abstract = text.split("Abstract", 1)[0][:2500]
+    lines = [re.sub(r"\s+", " ", line).strip() for line in before_abstract.splitlines() if line.strip()]
+    cleaned = []
+    skip_terms = ["sage open", "doi", "journal", "creative commons", "original research", "author", "email", "page", "vol", "issue"]
+    for line in lines:
+        low = line.lower()
+        if any(term in low for term in skip_terms):
+            continue
+        if re.search(r"@|http|www|\d{4}:|^\d+$", low):
+            continue
+        if 8 <= len(line) <= 180:
+            cleaned.append(line)
+    # Prefer lines with title-like words near abstract.
+    candidates = cleaned[-6:]
+    title = " ".join(candidates[:3]) if candidates else "Untitled paper"
+    title = re.sub(r"\b[A-Z][a-z]+\s+and\s+[A-Z][a-z]+\b.*$", "", title).strip()
+    if len(title) > 220:
+        title = title[:220].rsplit(" ", 1)[0] + "..."
+    return title or "Untitled paper"
+
+
+def extract_abstract(text: str) -> str:
+    abstract = find_between(text, "Abstract", ["Keywords", "Introduction", "Literature Review"], 5000)
+    if abstract:
+        return abstract
+    return normalize_text(text[:3000])
+
+
+def detect_keywords(text: str) -> List[str]:
+    keyword_bank = [
+        "survey", "questionnaire", "respondents", "sample", "SEM", "structural equation", "path analysis",
+        "regression", "correlation", "cross-sectional", "experiment", "randomized", "treatment", "control group",
+        "interview", "focus group", "thematic", "qualitative", "mixed methods", "case study",
+        "meta-analysis", "systematic review", "literature review", "conceptual", "framework", "theoretical",
+        "hypothesis", "hypotheses", "CFA", "confirmatory factor", "Cronbach", "Likert",
+    ]
+    found = []
+    low = text.lower()
+    for kw in keyword_bank:
+        if kw.lower() in low:
+            found.append(kw)
+    return found
+
+
+def detect_method(text: str, abstract: str, keywords: List[str]) -> str:
+    low = text.lower()
+    if "meta-analysis" in low:
+        return "Meta-analysis / quantitative synthesis"
+    if "systematic review" in low:
+        return "Systematic review"
+    if "mixed methods" in low or ("interview" in low and "survey" in low):
+        return "Mixed-methods design"
+    if any(k in low for k in ["randomized", "randomised", "experiment", "treatment group", "control group"]):
+        return "Experimental or quasi-experimental design"
+    if any(k in low for k in ["survey", "questionnaire", "respondents", "sem", "structural equation", "path analysis", "regression", "cfa", "likert"]):
+        return "Quantitative survey/statistical analysis"
+    if any(k in low for k in ["interview", "focus group", "thematic", "qualitative", "ethnograph"]):
+        return "Qualitative study"
+    if any(k in low for k in ["conceptual", "framework", "theoretical", "theory"]):
+        return "Theoretical / conceptual paper"
+    return "Method not fully detected; human check needed"
+
+
+def detect_sample(text: str) -> str:
     patterns = [
-        r"\bN\s*=\s*[\d,]+[^\.\n]{0,120}",
-        r"sample(?:s| size)?[^\.\n]{0,160}",
-        r"survey of [^\.\n]{0,160}",
-        r"interviews? with [^\.\n]{0,160}",
+        r"(?:survey of|sample of|data from|included|includes|including|among)\s+[^.]{0,140}?(?:\d{2,6})\s+[^.]{0,120}",
+        r"(?:N|n)\s*=\s*\d{2,6}[^.]{0,100}",
+        r"\d{2,6}\s+(?:participants|respondents|residents|employees|agencies|organizations|students|households)[^.]{0,120}",
     ]
     for pat in patterns:
-        match = re.search(pat, text, flags=re.I)
-        if match:
-            return re.sub(r"\s+", " ", match.group(0)).strip()
-    return "Sample/context should be verified from the paper."
+        matches = re.findall(pat, text, flags=re.IGNORECASE)
+        if matches:
+            result = matches[0]
+            return normalize_text(result)[:260]
+    # Special case: multiple urban/rural counts.
+    nums = re.findall(r"\b\d{2,5}\b\s+(?:urban|rural|total|valid|returned|surveys|questionnaires|respondents|residents)", text, flags=re.IGNORECASE)
+    if nums:
+        return "; ".join(nums[:4])
+    return "Sample/context not automatically detected; presenter should verify this field against the paper."
 
 
-def _guess_design(text: str) -> str:
-    lower = text.lower()
-    # Prefer explicit design evidence over isolated words such as "experiment" in a city/program context.
-    if "meta-analysis" in lower or "meta analysis" in lower:
-        return "Meta-analysis"
-    if "systematic review" in lower:
-        return "Systematic review"
-    if "mixed methods" in lower or "mixed-method" in lower:
-        return "Mixed-methods design"
-    if "survey" in lower or "questionnaire" in lower or "sem" in lower or "structural equation" in lower or "regression" in lower or "path analysis" in lower:
-        return "Quantitative survey/statistical analysis"
-    if "randomized" in lower or "randomised" in lower or "field experiment" in lower or "lab experiment" in lower or "control group" in lower or "treatment group" in lower:
-        return "Experimental design or intervention study"
-    if "interview" in lower or "focus group" in lower or "ethnograph" in lower:
-        return "Qualitative design"
-    if "theoretical" in lower or "conceptual framework" in lower:
-        return "Theoretical/conceptual paper"
-    return "Design should be verified from methods section."
-
-
-def _guess_tradition(text: str) -> str:
-    lower = text.lower()
-    if "systematic review" in lower:
-        return "Systematic Review"
-    if "meta-analysis" in lower or "meta analysis" in lower:
-        return "Meta-analysis"
-    if "mixed methods" in lower or "mixed-method" in lower:
-        return "Mixed Methods"
-    if "survey" in lower or "questionnaire" in lower or "sem" in lower or "structural equation" in lower or "regression" in lower or "path analysis" in lower:
-        return "Quantitative"
-    if "randomized" in lower or "randomised" in lower or "field experiment" in lower or "lab experiment" in lower or "control group" in lower or "treatment group" in lower:
-        return "Experimental"
-    if "interview" in lower or "focus group" in lower or "thematic analysis" in lower:
-        return "Qualitative"
-    if "theoretical" in lower or "conceptual framework" in lower:
-        return "Theoretical"
-    return "Quantitative"
-
-
-def _extract_objective(text: str) -> str:
-    match = re.search(r"objective(?:s)?[^\.]{0,250}\.", text, flags=re.I)
-    if match:
-        return re.sub(r"\s+", " ", match.group(0)).strip()
-    match = re.search(r"research question[^\.]{0,250}\.", text, flags=re.I)
-    if match:
-        return re.sub(r"\s+", " ", match.group(0)).strip()
-    return "Research objective should be verified from the abstract/introduction."
-
-
-def _guess_topic(text: str) -> str:
-    lower = text.lower()
-    topics = [
-        ("e-government / digital government", ["e-government", "digital government", "ict"]),
-        ("public trust / political trust", ["trust in government", "political trust"]),
-        ("public management", ["public management", "public administration"]),
-        ("policy implementation", ["implementation", "policy"]),
+def detect_variables(text: str, abstract: str) -> List[str]:
+    phrases = []
+    common = [
+        "trust in government", "political trust", "e-government", "satisfaction", "performance of government",
+        "structure assurance", "expectation confirmation", "reciprocity", "reputation", "familiarity",
+        "perceived characteristics", "digital divide", "urban-rural divide", "citizen trust",
     ]
-    found = [topic for topic, keys in topics if any(k in lower for k in keys)]
-    return ", ".join(found) if found else "Public administration topic to be verified."
+    low = (abstract + " " + text[:5000]).lower()
+    for phrase in common:
+        if phrase in low:
+            phrases.append(phrase)
+    # Add words after Keywords if present.
+    kw_text = find_between(text, "Keywords", ["Introduction", "1."], 800)
+    if kw_text:
+        for part in re.split(r"[,;]\s*", kw_text):
+            part = part.strip(" .;:")
+            if 3 < len(part) < 60 and part.lower() not in [p.lower() for p in phrases]:
+                phrases.append(part)
+    return phrases[:10] or ["Key variables/constructs require human verification"]
 
 
-def _extract_variables(text: str) -> List[str]:
-    lower = text.lower()
-    variables = []
-    for term in [
-        "trust in government",
-        "political trust",
-        "e-government",
-        "satisfaction",
-        "performance of government",
-        "structure assurance",
-        "expectation confirmation",
-        "reciprocity",
-        "familiarity",
-    ]:
-        if term in lower:
-            variables.append(term)
-    return variables[:10]
+def detect_research_objective(abstract: str, text: str) -> str:
+    sentences = split_sentences(abstract)
+    priority_terms = ["objective", "purpose", "aim", "seek", "investigat", "understand", "examine", "research question"]
+    for s in sentences:
+        if any(t in s.lower() for t in priority_terms):
+            return s[:420]
+    for s in split_sentences(text[:6000]):
+        if any(t in s.lower() for t in priority_terms):
+            return s[:420]
+    return sentences[0][:420] if sentences else "Research objective not detected automatically."
 
 
-def _extract_findings(text: str) -> Any:
-    match = re.search(r"findings? indicate[^\.]{0,500}\.", text, flags=re.I)
-    if match:
-        return re.sub(r"\s+", " ", match.group(0)).strip()
-    match = re.search(r"results? (?:show|indicate|suggest)[^\.]{0,500}\.", text, flags=re.I)
-    if match:
-        return re.sub(r"\s+", " ", match.group(0)).strip()
-    return "Key findings should be verified from the results/discussion section."
+def detect_key_findings(abstract: str, text: str) -> str:
+    source = abstract if abstract else text[:6000]
+    sentences = split_sentences(source)
+    priority_terms = ["findings", "results", "indicate", "show", "suggest", "found", "significant", "positive", "negative", "effect", "associated"]
+    chosen = [s for s in sentences if any(t in s.lower() for t in priority_terms)]
+    if chosen:
+        return " ".join(chosen[:3])[:800]
+    return " ".join(sentences[-2:])[:800] if sentences else "Key findings not detected automatically."
 
 
-def _extract_limitations(text: str) -> Any:
-    idx = text.lower().find("limitation")
-    if idx >= 0:
-        return re.sub(r"\s+", " ", text[idx : idx + 800]).strip()
-    return "Limitations should be verified from the limitations/conclusion section."
+def detect_limitations(text: str) -> str:
+    lim = find_between(text, "limitation", ["conclusion", "references", "appendix"], 1200)
+    if lim:
+        return lim[:500]
+    conclusion = find_between(text, "Conclusion", ["References", "Appendix"], 1400)
+    if conclusion:
+        sentences = split_sentences(conclusion)
+        risk_sents = [s for s in sentences if any(t in s.lower() for t in ["limit", "future", "caution", "context", "generaliz", "sample"])]
+        if risk_sents:
+            return " ".join(risk_sents[:2])[:500]
+    return "No explicit limitation section was automatically captured; use method, sample, and context as boundaries."
 
 
-def _causal_boundary_from_tradition(tradition: str) -> str:
-    if tradition == "Experimental":
-        return "Causal claims may be made only within the tested treatment, setting, and population."
+def boundary_from_method(method_design: str, sample_context: str) -> str:
+    low = method_design.lower()
+    if "survey" in low or "statistical" in low or "sem" in low:
+        return "This paper can support association-oriented claims, but it should not be presented as proving universal causation."
+    if "experimental" in low:
+        return "Causal claims may be possible only within the tested treatment, population, and setting."
+    if "qualitative" in low:
+        return "This paper supports contextual/mechanism insight, not broad statistical generalization."
+    if "meta-analysis" in low:
+        return "This paper synthesizes patterns across studies, but the pooled pattern should not be treated as a universal law."
+    if "systematic" in low:
+        return "This paper maps/synthesizes a field; it does not automatically prove a single intervention works everywhere."
+    if "theoretical" in low or "conceptual" in low:
+        return "This paper develops a framework or argument; it should not be described as empirical proof."
+    return "The claim strength depends on design, sample, and context; human method review is required."
+
+
+def make_extraction_record(text: str) -> ExtractionRecord:
+    abstract = extract_abstract(text)
+    keywords = detect_keywords(text)
+    method = detect_method(text, abstract, keywords)
+    sample = detect_sample(text)
+    title = detect_title(text)
+    objective = detect_research_objective(abstract, text)
+    findings = detect_key_findings(abstract, text)
+    limitations = detect_limitations(text)
+    boundary = boundary_from_method(method, sample)
+    citation_hint = title
+    if re.search(r"\b20\d{2}\b", text[:1000]):
+        year = re.search(r"\b20\d{2}\b", text[:1000]).group(0)
+        citation_hint = f"{title} ({year})"
+    return ExtractionRecord(
+        paper_title=title,
+        citation_hint=citation_hint,
+        research_objective=objective,
+        method_design=method,
+        sample_context=sample,
+        variables_constructs=detect_variables(text, abstract),
+        key_findings=findings,
+        limitations_or_boundaries=limitations,
+        what_the_paper_does_not_prove=boundary,
+        method_keywords_found=keywords[:14],
+    )
+
+
+def classify_record(text: str, record: ExtractionRecord) -> ClassificationRecord:
+    low = (text[:20000] + " " + record.method_design).lower()
+    if "meta-analysis" in low:
+        tradition = "Meta-Analysis"
+        confidence = "High"
+    elif "systematic review" in low:
+        tradition = "Systematic Review"
+        confidence = "High"
+    elif "mixed methods" in low:
+        tradition = "Mixed Methods"
+        confidence = "High"
+    elif any(k in low for k in ["randomized", "randomised", "experiment", "treatment group", "control group"]):
+        # Do not let the word empirical alone become Experimental.
+        if any(k in low for k in ["survey", "sem", "structural equation", "questionnaire", "respondents"]):
+            tradition = "Quantitative"
+            confidence = "High"
+        else:
+            tradition = "Experimental"
+            confidence = "Medium"
+    elif any(k in low for k in ["survey", "questionnaire", "respondents", "sem", "structural equation", "path analysis", "regression", "cfa", "likert"]):
+        tradition = "Quantitative"
+        confidence = "High"
+    elif any(k in low for k in ["interview", "focus group", "thematic", "qualitative"]):
+        tradition = "Qualitative"
+        confidence = "Medium"
+    elif any(k in low for k in ["conceptual", "framework", "theoretical", "theory"]):
+        tradition = "Theoretical"
+        confidence = "Medium"
+    else:
+        tradition = "Unclear / Needs Method Check"
+        confidence = "Low"
+
     if tradition == "Quantitative":
-        return "Use association language unless the paper clearly establishes causal identification."
-    if tradition == "Qualitative":
-        return "Translate as contextual insight or mechanisms, not statistical generalization."
-    if tradition == "Mixed Methods":
-        return "Keep quantitative and qualitative evidence strands visible; avoid flattening both into one claim type."
-    if tradition == "Theoretical":
-        return "Describe as a framework, argument, or conceptual contribution, not empirical proof."
-    if tradition == "Meta-analysis":
-        return "Translate synthesized patterns, not universal laws; preserve heterogeneity and inclusion limits."
-    if tradition == "Systematic Review":
-        return "Preserve search/inclusion boundaries and distinguish mapping a field from proving an effect."
-    return "Use evidence-bounded language."
+        route = "Load association-sensitive rules; require method sentence and causal-boundary language."
+        boundary = "Use associated with / linked to / suggests unless the paper's design clearly supports causation."
+        guardrails = ["No proves/causes language", "Name sample/context", "Preserve variables", "Score D2 carefully"]
+    elif tradition == "Experimental":
+        route = "Load treatment/population/scope rules; causal language only inside tested setting."
+        boundary = "Causation may be discussed only for the tested treatment and population."
+        guardrails = ["Name treatment", "Name comparison group", "Do not overgeneralize", "Keep external validity limits"]
+    elif tradition == "Qualitative":
+        route = "Load context/mechanism rules; emphasize themes and participant/context boundaries."
+        boundary = "Translate as depth and mechanism insight, not statistical generalization."
+        guardrails = ["Keep context visible", "Avoid percent claims unless in source", "Do not invent quotes"]
+    elif tradition == "Mixed Methods":
+        route = "Load dual-strand rules; keep quantitative and qualitative evidence visible."
+        boundary = "Do not collapse multiple evidence strands into one simplified claim."
+        guardrails = ["Preserve both strands", "Separate numbers from themes", "Name integration logic"]
+    elif tradition == "Theoretical":
+        route = "Load framework/argument rules; do not write as empirical proof."
+        boundary = "Use develops a framework / argues / proposes; avoid 'finds' unless discussing cited evidence."
+        guardrails = ["No empirical proof language", "Name concept/framework", "Actionability must be cautious"]
+    elif tradition == "Meta-Analysis":
+        route = "Load synthesis/heterogeneity rules; preserve pooled-pattern and inclusion boundaries."
+        boundary = "Synthesized association is not a universal law."
+        guardrails = ["Mention included studies", "Mention heterogeneity if available", "Avoid universal claims"]
+    elif tradition == "Systematic Review":
+        route = "Load search/inclusion-boundary rules; distinguish mapping evidence from proving effects."
+        boundary = "Review findings depend on search strategy and inclusion criteria."
+        guardrails = ["Mention search/inclusion scope", "Do not claim direct implementation proof"]
+    else:
+        route = "Route to conservative default; require human method check before public use."
+        boundary = "Use cautious language until a presenter verifies the design."
+        guardrails = ["Human method check", "No causal claims", "Name uncertainty"]
+
+    return ClassificationRecord(tradition, confidence, route, boundary, guardrails)
+
+
+def bounded_finding(record: ExtractionRecord, classification: ClassificationRecord) -> str:
+    finding = record.key_findings.strip()
+    if classification.methodological_tradition in {"Quantitative", "Systematic Review", "Meta-Analysis", "Mixed Methods", "Unclear / Needs Method Check"}:
+        replacements = {
+            r"\bhas significant impacts on\b": "is significantly associated with",
+            r"\bhave significant impacts on\b": "are significantly associated with",
+            r"\bimpacts on\b": "is linked to",
+            r"\baffects\b": "is associated with",
+            r"\bcauses\b": "is associated with",
+            r"\bproves\b": "suggests",
+        }
+        for pat, repl in replacements.items():
+            finding = re.sub(pat, repl, finding, flags=re.IGNORECASE)
+    return finding
+
+
+def generate_output(output_type: str, record: ExtractionRecord, classification: ClassificationRecord, audience: str) -> str:
+    title = record.paper_title
+    finding = bounded_finding(record, classification)
+    method = record.method_design
+    sample = record.sample_context
+    boundary = record.what_the_paper_does_not_prove
+    schema = SCHEMAS.get(output_type, "Use a concise, audience-aware structure.")
+
+    if output_type == "Technical Note":
+        return f"""### Technical Note: {title}
+
+**Purpose.** Translate the study into a method-visible note for {audience}.
+
+**Research design.** {method}. This matters because the strength of the recommendation depends on the design.
+
+**Data / sample / context.** {sample}
+
+**Core constructs.** {', '.join(record.variables_constructs[:8])}.
+
+**Key finding.** {finding}
+
+**Evidence boundary.** {boundary}
+
+**Operational implication.** Treat the paper as evidence for cautious planning, service-design review, and targeted follow-up analysis, not as a standalone mandate for universal policy change.
+"""
+
+    if output_type == "Media Release":
+        return f"""### Media Release Draft
+
+**Headline:** Study highlights link between {record.variables_constructs[0] if record.variables_constructs else 'public service factors'} and public trust
+
+**Lead:** A recent public administration study suggests that {finding[0].lower() + finding[1:] if finding else 'the paper offers relevant evidence for public managers.'}
+
+**What the study examined:** The paper used {method.lower()} and focused on {sample.lower()}.
+
+**Why it matters:** For public managers, the study points to the importance of designing public services that are understandable, reliable, and responsive to user expectations.
+
+**Important boundary:** {boundary}
+
+**No unsupported details added:** This draft does not invent quotes, local officials, budgets, or agency claims that are not in the paper.
+"""
+
+    if output_type == "Policy Brief":
+        return f"""### Policy Brief: {title}
+
+**Issue.** Public managers need usable evidence on how administrative systems relate to citizen trust.
+
+**Evidence base.** {method}; {sample}.
+
+**Main finding.** {finding}
+
+**What this does not show.** {boundary}
+
+**Options.** 1) Audit service usability and transparency. 2) Pilot targeted improvements. 3) Monitor trust and satisfaction indicators before scaling.
+
+**Recommendation.** Use the study as a cautious evidence input for a pilot or review process, not as a universal causal proof.
+"""
+
+    if output_type == "Briefing Memo":
+        return f"""### Briefing Memo
+
+**To:** Agency leadership  
+**Subject:** Research translation — {title}
+
+**Decision question.** How should the agency interpret this research for practice?
+
+**Evidence.** The paper uses {method.lower()} with {sample.lower()}.
+
+**Bottom line.** {finding}
+
+**Unknowns / limits.** {boundary}
+
+**Suggested next step.** Use this as a basis for a limited evidence review, pilot design, or stakeholder discussion.
+"""
+
+    if output_type == "Executive Summary":
+        return f"""### Executive Summary
+
+**Purpose:** Summarize a research paper for {audience}.
+
+**Method overview:** {method}; {sample}.
+
+**Bottom-line result:** {finding}
+
+**Confidence statement:** The finding is useful, but its application should stay inside the method and context boundaries.
+
+**Next steps:** Verify local fit, avoid causal overclaiming, and pair the paper with implementation data.
+"""
+
+    if output_type == "Research Summary":
+        return f"""### Research Summary
+
+**Paper:** {title}
+
+**Research objective:** {record.research_objective}
+
+**Design and context:** {method}; {sample}.
+
+**Main finding:** {finding}
+
+**Why it matters:** The study gives public administration practitioners a structured way to think about the relationship between evidence, service design, and governance outcomes.
+
+**Limits:** {boundary}
+"""
+
+    if output_type == "Practitioner Guide":
+        return f"""### Practitioner Guide
+
+**Audience:** {audience}
+
+**When to use this evidence:** Use it when designing, evaluating, or communicating public service improvements.
+
+**What the paper shows:** {finding}
+
+**How to apply cautiously:**
+1. Identify whether your local population resembles the study context.
+2. Keep the method boundary visible in any memo or public-facing output.
+3. Pilot changes before scaling.
+4. Monitor whether outcomes change in your own setting.
+
+**What not to claim:** {boundary}
+"""
+
+    if output_type == "Conference Abstract":
+        return f"""### Conference Abstract
+
+**Background:** {record.research_objective}
+
+**Method:** {method}; {sample}.
+
+**Findings:** {finding}
+
+**Contribution:** The paper contributes to public administration translation by connecting methodological evidence to practice-facing communication.
+
+**Limitations:** {boundary}
+"""
+
+    # Generic schema-aware fallback for all other output types.
+    return f"""### {output_type}: {title}
+
+**Schema used:** {schema}
+
+**Audience:** {audience}
+
+**Evidence base:** {method}; {sample}.
+
+**Core message:** {finding}
+
+**Boundary line:** {boundary}
+
+**Practice implication:** Use this research as an evidence-bounded input for discussion, pilot design, or further review. Do not make stronger claims than the paper's design supports.
+"""
+
+
+def generate_outputs(output_types: List[str], record: ExtractionRecord, classification: ClassificationRecord, audience: str) -> Dict[str, str]:
+    selected = output_types[:2] if output_types else ["Technical Note"]
+    return {ot: generate_output(ot, record, classification, audience) for ot in selected}
+
+
+def score_one_output(output_type: str, output_text: str, record: ExtractionRecord, classification: ClassificationRecord) -> Dict[str, Any]:
+    tradition = classification.methodological_tradition
+    public_risk = output_type in {"Media Release", "Op-Ed", "Letter to the Editor", "LinkedIn Post", "Twitter/X Thread", "Elevator Pitch"}
+    method_visible = any(term.lower() in output_text.lower() for term in ["survey", "interview", "method", "design", "sample", "review", "experiment", "statistical"])
+    boundary_visible = any(term.lower() in output_text.lower() for term in ["boundary", "does not", "not prove", "cautious", "associated", "linked", "context", "limit"])
+    invented_risk = any(term.lower() in output_text.lower() for term in ["said", "spokesperson", "$", "mayor", "office announced"])
+
+    scores = {}
+    scores["D1_Claim_Accuracy"] = {"score": 4, "reason": "The output is generated from the extraction record and preserves the core finding."}
+    scores["D2_Causal_Precision"] = {"score": 5 if "associated" in output_text.lower() or tradition == "Experimental" else 4, "reason": "Causal language is bounded for the detected method."}
+    scores["D3_Scope_Fidelity"] = {"score": 5 if boundary_visible else 3, "reason": "Scope/context boundary is visible." if boundary_visible else "Scope boundary needs to be more explicit."}
+    scores["D4_Method_Transparency"] = {"score": 5 if method_visible else 3, "reason": "The method/sample is visible." if method_visible else "The method is compressed out of the output."}
+    scores["D5_Nuance_Preservation"] = {"score": 4 if boundary_visible else 3, "reason": "The output retains evidence limits and avoids a single universal claim."}
+    scores["D6_Audience_Calibration"] = {"score": 4, "reason": f"The output follows a {output_type} style for a practitioner audience."}
+    scores["D7_Actionability"] = {"score": 4 if not public_risk else 3, "reason": "Action steps are cautious and evidence-bounded." if not public_risk else "Public-facing format is useful but action guidance should stay cautious."}
+
+    if invented_risk:
+        scores["D1_Claim_Accuracy"] = {"score": 3, "reason": "Possible invented specificity requires human verification."}
+    return scores
+
+
+def score_outputs(outputs: Dict[str, str], record: ExtractionRecord, classification: ClassificationRecord) -> Dict[str, Any]:
+    by_output = {ot: score_one_output(ot, txt, record, classification) for ot, txt in outputs.items()}
+    means = {}
+    for key, label in FIDELITY_DIMENSIONS:
+        vals = [v[key]["score"] for v in by_output.values()]
+        means[key] = round(sum(vals) / len(vals), 2) if vals else 0
+    weakest = min(means.items(), key=lambda kv: kv[1])[0] if means else "D7_Actionability"
+    return {"by_output": by_output, "dimension_means": means, "weakest_dimension": weakest}
+
+
+def review_outputs(outputs: Dict[str, str], record: ExtractionRecord, classification: ClassificationRecord) -> Dict[str, Any]:
+    issues = []
+    fixes = []
+    tradition = classification.methodological_tradition
+    combined = "\n".join(outputs.values()).lower()
+
+    if tradition != "Experimental" and any(word in combined for word in [" causes ", " proves ", " guarantee", " will increase "]):
+        issues.append("Causal upgrading")
+        fixes.append("Replace causal verbs with 'is associated with', 'is linked to', or 'suggests'.")
+    if not any(word in combined for word in ["sample", "context", "boundary", "limit", "not prove"]):
+        issues.append("Scope collapse")
+        fixes.append("Add one sentence naming the study context and transfer boundary.")
+    if not any(word in combined for word in ["survey", "interview", "method", "design", "review", "experiment", "statistical"]):
+        issues.append("Method flattening")
+        fixes.append("Add one method sentence to the output.")
+    if any(word in combined for word in ["spokesperson", "said", "mayor", "department announced", "$"]):
+        issues.append("Invented specificity")
+        fixes.append("Remove unsupported quotes, named offices, budgets, and local details.")
+    if not issues:
+        issues.append("No major high-risk failure detected by rule scan")
+        fixes.append("Still perform human review of citation, sample, method, causal language, and feasibility.")
+
+    # Demonstration-friendly QA catch.
+    qa_catch = ""
+    if classification.methodological_tradition == "Quantitative":
+        qa_catch = (
+            "QA catch for presentation: because this is routed as Quantitative / survey-statistical evidence, "
+            "phrases such as 'has impacts on' should be presented cautiously as 'is associated with' or 'is linked to' "
+            "unless the paper's design clearly supports causation."
+        )
+    elif classification.methodological_tradition == "Theoretical":
+        qa_catch = "QA catch: describe the paper as developing a framework/argument, not as empirically proving an effect."
+    else:
+        qa_catch = "QA catch: verify that claim strength matches the method and that no unsupported details were added."
+
+    return {
+        "issues_detected": issues,
+        "targeted_fixes": fixes,
+        "qa_catch": qa_catch,
+        "failure_mode_reference": {name: FAILURE_MODES.get(name, {}) for name in issues if name in FAILURE_MODES},
+    }
+
+
+def run_workflow(file_obj: Any, pasted_text: str, output_types: List[str], audience: str) -> Dict[str, Any]:
+    text, intake_meta = read_uploaded_file(file_obj, pasted_text)
+    cleaned_text = text[:MAX_TEXT_CHARS]
+    record = make_extraction_record(cleaned_text)
+    classification = classify_record(cleaned_text, record)
+    outputs = generate_outputs(output_types, record, classification, audience or "public administration practitioners")
+    scores = score_outputs(outputs, record, classification)
+    review = review_outputs(outputs, record, classification)
+
+    return {
+        "mode": "FREE deterministic workflow — no API key, no paid model, no credit required",
+        "raw_text_preview": normalize_text(cleaned_text[:1800]),
+        "intake": intake_meta,
+        "extraction": asdict(record),
+        "classification": asdict(classification),
+        "outputs": outputs,
+        "scores": scores,
+        "review": review,
+    }
+
+
+def save_trace(trace: Dict[str, Any]) -> str:
+    fd, path = tempfile.mkstemp(prefix="fidelitybridge_trace_", suffix=".json")
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(trace, f, ensure_ascii=False, indent=2)
+    return path

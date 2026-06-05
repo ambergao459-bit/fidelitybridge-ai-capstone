@@ -1,35 +1,50 @@
-"""Prompt library and output schemas for FidelityBridge AI.
-
-This file is intentionally separate from app.py so presenters can open it during
-Slide 4 / backend-code explanation and show that the demo is staged prompts, not
-one mega-prompt.
+"""Prompt/rule library for FidelityBridge AI Free Mode.
+No paid API is used. The app uses deterministic extraction, routing, templates, and QA checks.
 """
 
-from __future__ import annotations
+APP_TITLE = "FidelityBridge AI — Free Workflow Demo"
 
-from typing import Dict, List
-
-METHOD_TRADITIONS: List[str] = [
-    "Quantitative",
-    "Qualitative",
-    "Mixed Methods",
-    "Theoretical",
-    "Experimental",
-    "Meta-analysis",
-    "Systematic Review",
+STAGES = [
+    ("intake", "1 Intake"),
+    ("extract", "2 Extract"),
+    ("classify", "3 Classify"),
+    ("generate", "4 Generate"),
+    ("score", "5 Score D1-D7"),
+    ("review", "6 Review / QA Fix"),
 ]
 
-FIDELITY_DIMENSIONS: Dict[str, str] = {
-    "D1_Claim_Accuracy": "Does the output preserve the paper's actual claims and findings?",
-    "D2_Causal_Precision": "Does it avoid causal language unless the design supports causation?",
-    "D3_Scope_Fidelity": "Does it preserve context, population, setting, and transfer limits?",
-    "D4_Method_Transparency": "Does it keep the method/design visible enough for the audience?",
-    "D5_Nuance_Preservation": "Does it preserve caveats, uncertainty, and competing explanations?",
-    "D6_Audience_Calibration": "Does it match the requested audience, tone, and format?",
-    "D7_Actionability": "Are recommendations specific, useful, and evidence-bounded?",
-}
+FIDELITY_DIMENSIONS = [
+    ("D1_Claim_Accuracy", "Claim Accuracy"),
+    ("D2_Causal_Precision", "Causal Precision"),
+    ("D3_Scope_Fidelity", "Scope Fidelity"),
+    ("D4_Method_Transparency", "Method Transparency"),
+    ("D5_Nuance_Preservation", "Nuance Preservation"),
+    ("D6_Audience_Calibration", "Audience Calibration"),
+    ("D7_Actionability", "Actionability"),
+]
 
-OUTPUT_SCHEMAS: Dict[str, str] = {
+OUTPUT_TYPES = [
+    "Policy Brief",
+    "Technical Note",
+    "Executive Summary",
+    "Op-Ed",
+    "LinkedIn Post",
+    "Twitter/X Thread",
+    "Briefing Memo",
+    "Elevator Pitch",
+    "Infographic Text",
+    "Mechanism Map",
+    "Research Summary",
+    "Literature Review Entry",
+    "Practitioner Guide",
+    "Training Module Outline",
+    "Grant Concept Note",
+    "Media Release",
+    "Letter to the Editor",
+    "Conference Abstract",
+]
+
+SCHEMAS = {
     "Policy Brief": "Issue statement; evidence base; what it does not show; options; recommendation; caveats.",
     "Technical Note": "Research design; data; operationalization; analytical approach; findings; limitations.",
     "Executive Summary": "Purpose; problem; methodology overview; bottom-line results; confidence; next steps.",
@@ -39,7 +54,7 @@ OUTPUT_SCHEMAS: Dict[str, str] = {
     "Briefing Memo": "To/from/subject; context; decision question; evidence; recommendation; unknowns.",
     "Elevator Pitch": "Hook; problem; solution; ask; method guardrail.",
     "Infographic Text": "Main header; three data callouts; bottom note; practical takeaway.",
-    "Mechanism Map": "Central variable; labeled arrows; logic explanation; boundary note.",
+    "Mechanism Map": "Central variable; arrows; logic explanation; boundary note.",
     "Research Summary": "Overview; design; main findings; why it matters; limits.",
     "Literature Review Entry": "APA citation; research focus; method; core contribution; methodological fit; translation caution.",
     "Practitioner Guide": "Audience; when to use evidence; what the paper shows; application steps; what not to claim.",
@@ -50,128 +65,39 @@ OUTPUT_SCHEMAS: Dict[str, str] = {
     "Conference Abstract": "Background; method; findings; contribution; limitations.",
 }
 
-FAILURE_MODES: Dict[str, str] = {
-    "Causal upgrading": "Association, correlation, or conceptual argument is rewritten as proof or direct causation.",
-    "Invented specificity": "The output adds unsupported quotes, local offices, budgets, dates, people, or statistics.",
-    "Scope collapse": "A bounded sample, country, method, or setting becomes a universal prescription.",
-    "Method flattening": "The output hides or oversimplifies the study design, sample, or evidence type.",
-    "Actionability drift": "Recommendations become stronger, broader, or more operational than the evidence supports.",
-    "Citation drift": "A finding or cited claim is attributed to the focal paper when it came from background literature.",
-    "Jargon echo": "Technical terms remain unexplained in public or practitioner-facing formats.",
+STAGE_PROMPTS = {
+    "intake": "Intake prompt: parse the uploaded paper, identify visible citation clues, abstract, section headings, file size, and source text quality. Do not generate outputs yet.",
+    "extract": "Extraction prompt: create a source-bound record with citation, research objective, method/design, sample/context, key findings, limits, and what the paper does not prove.",
+    "classify": "Classification prompt: classify methodological tradition and route the paper to method-aware generation and QA rules.",
+    "generate": "Generation prompt: generate only 1-2 requested output types from the extraction record and output schema. Preserve method, scope, and evidence boundaries.",
+    "score": "Scoring prompt: score each output across D1-D7 with a 1-5 score, concise reason, weakest dimension, and targeted revision rule.",
+    "review": "Review prompt: run QA scans for causal upgrading, scope collapse, method flattening, invented specificity, and actionability drift; then show the fix.",
 }
 
-SYSTEM_MESSAGE = """You are FidelityBridge AI, a public-administration research translation workflow.
-Your job is to preserve fidelity to method, scope, claims, and evidence limits while creating practitioner-ready outputs.
-You must never invent statistics, quotations, local agencies, dates, author claims, or policy effects not present in the source.
-Show caution around causation. If a study is cross-sectional, correlational, theoretical, qualitative, systematic review, or meta-analysis, do not use 'causes', 'proves', or 'will lead to' unless the paper's design and text clearly support it.
-"""
-
-EXTRACTION_PROMPT = """STAGE 2: EXTRACT TO STRUCTURED RECORD
-Read the research paper text below and create a source-bound extraction sheet before any writing begins.
-Return valid JSON only, with these keys:
-- apa_citation_best_effort
-- title
-- authors
-- year
-- research_question_or_objective
-- public_administration_topic
-- data_sample_context
-- research_design
-- methodological_tradition_candidate
-- variables_or_constructs
-- key_findings
-- limitations_stated_or_inferred
-- what_the_paper_does_not_prove
-- causal_language_boundary
-- direct_evidence_quotes_short
-- translation_guardrails
-
-Paper text:
-{paper_text}
-"""
-
-CLASSIFICATION_PROMPT = """STAGE 3: CLASSIFY + ROUTE
-Using the extraction sheet below, classify the paper into exactly one of these traditions:
-Quantitative, Qualitative, Mixed Methods, Theoretical, Experimental, Meta-analysis, Systematic Review.
-Return valid JSON only, with keys:
-- tradition
-- confidence_1_to_5
-- rationale
-- evidence_boundary
-- routing_rules
-- risky_language_to_avoid
-- recommended_outputs_for_demo
-
-Extraction sheet:
-{extraction_json}
-"""
-
-GENERATION_PROMPT = """STAGE 5: GENERATE 1-2 OUTPUTS FROM THE EXTRACTION SHEET ONLY
-Generate the requested output type(s) for the target audience. Use the schema for each output type.
-Do not generate all 18 outputs. This live demo should generate only the requested 1-2 representative outputs.
-Preserve method, scope, and evidence limits. Include at least one method/scope/caution sentence when the output is public-facing or persuasive.
-Do not invent local facts, quotes, people, costs, dates, institutions, or policy effects.
-
-Target audience: {target_audience}
-Requested output types and schemas:
-{selected_schemas}
-
-Classification and routing:
-{classification_json}
-
-Extraction sheet:
-{extraction_json}
-
-Return Markdown with clear headings for each output.
-"""
-
-SCORING_PROMPT = """STAGE 6: SCORE ON 7 FIDELITY DIMENSIONS
-Score the generated output against the extraction sheet and classification route.
-Return valid JSON only, with:
-- scores: object with D1_Claim_Accuracy, D2_Causal_Precision, D3_Scope_Fidelity, D4_Method_Transparency, D5_Nuance_Preservation, D6_Audience_Calibration, D7_Actionability. Each dimension must include two fields named score and reason.
-- weakest_dimension
-- strongest_dimension
-- likely_failure_modes
-- targeted_revision_needed
-- one_sentence_presenter_takeaway
-
-Scale: 1 = weak, 3 = acceptable but needs revision, 5 = strong.
-
-Fidelity dimensions:
-{dimensions}
-
-Extraction sheet:
-{extraction_json}
-
-Classification:
-{classification_json}
-
-Generated output:
-{generated_output}
-"""
-
-QA_FIX_PROMPT = """STAGE 6: REVIEW + QA CATCH + TARGETED FIX
-Find one real fidelity risk in the generated output and repair it. Prioritize causal overstatement, invented specificity, scope collapse, method flattening, or actionability drift.
-Return Markdown with these headings:
-1. QA Catch
-2. Failure Mode Name
-3. Why It Matters
-4. Before -> After Fix
-5. Revised Output Section Only
-6. Presenter Line
-
-Failure mode catalog:
-{failure_modes}
-
-Extraction sheet:
-{extraction_json}
-
-Classification:
-{classification_json}
-
-Scores:
-{scores_json}
-
-Generated output:
-{generated_output}
-"""
+FAILURE_MODES = {
+    "Causal upgrading": {
+        "trigger": "Survey, correlational, theoretical, review, or SEM evidence in persuasive/public-facing outputs.",
+        "example": "associated with -> causes / proves / will increase",
+        "fix": "Use bounded verbs: is associated with, is linked to, suggests, may support.",
+    },
+    "Scope collapse": {
+        "trigger": "One context, country, sample, or institution becomes a universal recommendation.",
+        "example": "one Chongqing sample -> all governments should adopt this everywhere",
+        "fix": "Add context and transferability boundary.",
+    },
+    "Method flattening": {
+        "trigger": "Short outputs compress out survey/interview/review design details.",
+        "example": "The output states the finding but hides the method.",
+        "fix": "Require one method sentence in every output.",
+    },
+    "Invented specificity": {
+        "trigger": "Media releases, memos, or public posts invent quotes, offices, dates, costs, or local actors.",
+        "example": "An invented agency quote appears in a media release.",
+        "fix": "Ban unsupported names, quotes, statistics, and local details.",
+    },
+    "Actionability drift": {
+        "trigger": "A practical format turns a cautious finding into a strong intervention recommendation.",
+        "example": "Launch a citywide reform immediately based on one observational study.",
+        "fix": "Use pilot, review, monitor, or adapt language instead of universal commands.",
+    },
+}
